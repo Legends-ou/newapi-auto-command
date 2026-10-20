@@ -240,6 +240,16 @@ sudo bash deploy.sh uninstall --keep-data   # 先把数据备份到 /var/backups
 | systemd 单元 | `sub2api.service`、`sub2api-redis.service` |
 | 日志 | `journalctl -u sub2api -f`，或 `/opt/sub2api/data/logs/` |
 
+装完后会生成一个快捷命令 **`sub`**，以后不用再贴 curl：
+
+```bash
+sub              # 打开全屏菜单
+sub status       # 查看状态（含访问地址）
+sub uninstall    # 卸载
+```
+
+它执行的是本地副本 `/opt/sub2api/deploy.sh`；副本丢失时会自动从仓库重新拉取，非 root 用户会自动走 `sudo`。
+
 ```bash
 systemctl status sub2api
 systemctl status sub2api-redis
@@ -280,6 +290,25 @@ sudo bash deploy.sh --gh-proxy https://ghproxy.net/
 1. `systemctl status sub2api`
 2. `curl -i http://127.0.0.1:8080/health`
 3. `ufw status`；云服务器还要在安全组放行 8080（脚本只能改本机 ufw）
+
+**域名打不开**
+
+先跑：
+
+```bash
+sudo bash deploy.sh status
+```
+
+它会直接显示**访问地址**，并做四项检查：DNS 是否指向本机、Nginx 是否运行、80/443 是否在监听、证书是否签发。
+
+按出现频率排查：
+
+1. **云安全组没放行 80/443**（最常见）。阿里云 / 腾讯云要在控制台安全组里加规则，脚本改不了；
+2. **只做了 DNS 解析，没配域名模式**。`status` 里没有「域名」那一行，就说明还是 IP 模式，跑 `deploy.sh domain` 配置；
+3. **80 端口被占用或 Nginx 没起来**：`systemctl status nginx`、`nginx -t`；
+4. **证书没签发**（80 不通时 certbot 必然失败）：修好 80 后重跑 `domain`。
+
+> 网关本身只监听 `127.0.0.1:8080`（域名模式）或 `0.0.0.0:8080`（IP 模式），由 Nginx 转发 80/443。
 
 **端口 5433 / 6380 被占用**
 

@@ -41,6 +41,11 @@ PG_VERSION_DEFAULT="16"
 REDIS_BUILD_VERSION="7.4.2"
 NGINX_SITE="/etc/nginx/sites-available/sub2api.conf"
 
+# 发布地址：sub 快捷命令的本地副本丢失时，用它重新拉取。
+SCRIPT_URL="https://raw.githubusercontent.com/Legends-ou/sub2api-auto-command/main/deploy.sh"
+SUB_BIN="/usr/local/bin/sub"
+LOCAL_SCRIPT="${INSTALL_DIR}/deploy.sh"
+
 ACTION="install"
 PORT="8080"
 PORT_SET="false"
@@ -374,6 +379,44 @@ rand_hex() { openssl rand -hex "$1"; }
 env_get() {
   [ -f "$ENV_FILE" ] || return 0
   sed -n "s/^$1=//p" "$ENV_FILE" | sed -n '1p'
+}
+
+save_self() {
+  # 保存一份脚本本体，供 sub 快捷命令离线使用。
+  if [ -f "${BASH_SOURCE[0]:-}" ]; then
+    if cp -f "${BASH_SOURCE[0]}" "$LOCAL_SCRIPT" 2>/dev/null; then
+      chmod 0755 "$LOCAL_SCRIPT"
+      return 0
+    fi
+  fi
+  if curl -fsSL --connect-timeout 10 --max-time 60 "$SCRIPT_URL" -o "$LOCAL_SCRIPT" 2>/dev/null; then
+    chmod 0755 "$LOCAL_SCRIPT"
+    return 0
+  fi
+  return 1
+}
+
+install_launcher() {
+  if ! save_self; then
+    log_warn "未能保存本地脚本副本，sub 每次会尝试从网络拉取"
+  fi
+
+  cat > "$SUB_BIN" <<EOF
+#!/usr/bin/env bash
+# Sub2API 快捷入口（由 deploy.sh 安装）
+SCRIPT="${LOCAL_SCRIPT}"
+if [ ! -f "\$SCRIPT" ]; then
+  echo "本地脚本不存在，正在下载..."
+  curl -fsSL "${SCRIPT_URL}" -o "\$SCRIPT" || { echo "下载失败，请检查网络"; exit 1; }
+  chmod 0755 "\$SCRIPT"
+fi
+if [ "\$(id -u)" -ne 0 ]; then
+  exec sudo bash "\$SCRIPT" "\$@"
+fi
+exec bash "\$SCRIPT" "\$@"
+EOF
+  chmod 0755 "$SUB_BIN"
+  log_ok "已安装快捷命令：输入 sub 直接打开菜单（也支持 sub status / sub uninstall）"
 }
 
 check_memory() {
@@ -1275,6 +1318,9 @@ setup_nginx() {
 
   ln -sf "$NGINX_SITE" /etc/nginx/sites-enabled/sub2api.conf
   ST_NGINX_SITE_CREATED="true"
+  # 先记下域名：即使后面证书失败，status/重跑也能知道配的是哪个域名。
+  ST_DOMAIN="$DOMAIN"
+  ST_TLS_EMAIL="$TLS_EMAIL"
 
   local tmp_http tmp_tls cert_dir
   tmp_http="$(mktemp)"
@@ -1404,6 +1450,7 @@ print_summary() {
   echo "  安装状态：${STATE_FILE}（卸载依赖它，请勿删除）"
   echo ""
   echo "  常用命令："
+  echo "    sub                     再次打开本菜单"
   echo "    systemctl status ${SERVICE}"
   echo "    journalctl -u ${SERVICE} -f"
   echo "    systemctl restart ${SERVICE}"
@@ -1535,6 +1582,7 @@ verify_clean() {
 
   check_path "$INSTALL_DIR"
   check_path "$CONF_DIR"
+  check_path "$SUB_BIN"
   check_unit "${SERVICE}.service"
   check_unit "${REDIS_UNIT}.service"
 
@@ -1640,6 +1688,7 @@ cmd_install() {
   save_state
   write_credentials "$url"
   print_summary "$url"
+  install_launcher
   if [ "$nginx_ok" = "false" ]; then
     log_warn "HTTPS 没配成功：先按上面的提示排查，再重跑 --domain 即可"
   fi
@@ -1687,8 +1736,95 @@ cmd_upgrade() {
   chown "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_DIR}/sub2api"
   start_service
 
+  # 顺手更新本地脚本副本，sub 下次打开就是新版
+  save_self >/dev/null 2>&1 || true
+
   log_ok "升级完成：$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
   log_info "回滚方式：cp ${INSTALL_DIR}/sub2api.bak ${INSTALL_DIR}/sub2api && systemctl restart ${SERVICE}"
+}
+
+access_url() {
+  local domain="${ST_DOMAIN:-}"
+  if [ -n "$domain" ]; then
+    if [ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]; then
+      printf 'https://%s' "$domain"
+    else
+      printf 'http://%s' "$domain"
+    fi
+    return 0
+  fi
+  local ip=""
+  ip="$(get_public_ip || true)"
+  [ -n "$ip" ] || ip="<服务器IP>"
+  printf 'http://%s:%s' "$ip" "$PORT"
+}
+
+is_listening() {
+  local port="$1"
+  command -v ss >/dev/null 2>&1 || return 1
+  ss -lntH 2>/dev/null | awk -v p=":${port}" '$4 ~ (p "$") { found = 1 } END { exit !found }'
+}
+
+status_domain_diagnostics() {
+  local domain="$1" issues=0 dns_ips="" pub="" ip
+
+  echo "--- 域名与 HTTPS 检查 ---"
+
+  pub="$(get_public_ip || true)"
+  dns_ips="$(getent ahosts "$domain" 2>/dev/null | awk '{ print $1 }' | sort -u | tr '\n' ' ')"
+  if [ -n "$dns_ips" ]; then
+    echo "DNS 解析  ：${dns_ips}"
+    if [ -n "$pub" ]; then
+      case " ${dns_ips} " in
+        *" ${pub} "*) ;;
+        *)
+          log_warn "域名解析到的 IP 与服务器公网 IP（${pub}）不一致"
+          issues=$((issues + 1))
+          ;;
+      esac
+    fi
+  else
+    log_warn "域名无法解析（DNS 未生效或解析未指向本机）"
+    issues=$((issues + 1))
+  fi
+
+  if systemctl is-active nginx >/dev/null 2>&1; then
+    echo "Nginx     ：运行中"
+  else
+    log_warn "Nginx 未运行：systemctl status nginx"
+    issues=$((issues + 1))
+  fi
+
+  if is_listening 80; then
+    echo "80 端口   ：本机监听中"
+  else
+    log_warn "本机没有监听 80 端口（Nginx 未启动或配置未生效）"
+    issues=$((issues + 1))
+  fi
+
+  if [ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]; then
+    if is_listening 443; then
+      echo "443 端口  ：本机监听中"
+    else
+      log_warn "证书已签发但本机没有监听 443"
+      issues=$((issues + 1))
+    fi
+  else
+    log_warn "证书未签发，HTTPS 不可用：重跑 domain 命令申请"
+    issues=$((issues + 1))
+  fi
+
+  echo ""
+  echo "  云服务器（阿里云 / 腾讯云）还需在控制台【安全组】放行 80、443；"
+  echo "  脚本只能改本机防火墙，改不了云安全组。"
+  echo "  自测：curl -I http://${domain}"
+  echo ""
+
+  if [ "$issues" -eq 0 ]; then
+    log_ok "域名相关检查未发现问题"
+  else
+    log_warn "发现 ${issues} 处问题，按上面的提示处理"
+  fi
 }
 
 cmd_status() {
@@ -1697,25 +1833,39 @@ cmd_status() {
 
   load_state
   PORT="$(env_get SERVER_PORT)"
-  [ -n "$PORT" ] || PORT="8080"
+  [ -n "$PORT" ] || PORT="${ST_SERVER_PORT:-8080}"
+
+  local domain="${ST_DOMAIN:-}"
+  local url
+  url="$(access_url)"
 
   echo ""
-  echo "版本：$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
-  echo "端口：${PORT}"
+  echo "访问地址：${url}"
+  if [ -n "$domain" ]; then
+    echo "域名    ：${domain}"
+  fi
+  echo "版本    ：$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
+  echo "端口    ：${PORT}"
   echo ""
-  systemctl is-active "$SERVICE" >/dev/null 2>&1 && echo "应用：运行中" || echo "应用：未运行"
-  systemctl is-active "$REDIS_UNIT" >/dev/null 2>&1 && echo "Redis 实例：运行中（:${ST_REDIS_PORT}）" || echo "Redis 实例：未运行"
+  systemctl is-active "$SERVICE" >/dev/null 2>&1 && echo "应用      ：运行中" || echo "应用      ：未运行"
+  systemctl is-active "$REDIS_UNIT" >/dev/null 2>&1 && echo "Redis     ：运行中（:${ST_REDIS_PORT:-?}）" || echo "Redis     ：未运行"
   if [ -n "${ST_PG_PORT:-}" ] && pg_isready -h 127.0.0.1 -p "$ST_PG_PORT" -q; then
-    echo "PostgreSQL 集群：运行中（:${ST_PG_PORT}）"
+    echo "PostgreSQL：运行中（:${ST_PG_PORT}）"
   else
-    echo "PostgreSQL 集群：未运行"
+    echo "PostgreSQL：未运行"
   fi
   if curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
-    echo "健康检查：通过"
+    echo "健康检查  ：通过"
   else
-    echo "健康检查：失败"
+    echo "健康检查  ：失败"
   fi
   echo ""
+
+  if [ -n "$domain" ]; then
+    status_domain_diagnostics "$domain"
+    echo ""
+  fi
+
   systemctl status "$SERVICE" --no-pager -l | sed -n '1,20p' || true
 }
 
@@ -1825,6 +1975,7 @@ cmd_uninstall() {
   step "移除用户与目录"
   rm -rf "$INSTALL_DIR"
   rm -rf "$CONF_DIR"
+  rm -f "$SUB_BIN"
   userdel "$SERVICE_USER" 2>/dev/null || true
 
   if [ -n "$ufw_ports" ] && command -v ufw >/dev/null 2>&1; then
@@ -1889,8 +2040,13 @@ cmd_domain() {
   if ensure_domain_setup true; then
     log_ok "已启用：https://${DOMAIN}"
     echo ""
-    echo "  账号密码不变，可用 show 查看。"
-    echo "  建议在后台「系统设置」里把站点地址改成 https://${DOMAIN}"
+    echo "  访问地址：https://${DOMAIN}"
+    echo "  账号密码不变，可用 show 查看；建议在后台「系统设置」里把站点地址改成该地址。"
+    echo ""
+    echo "  如果浏览器打不开，按顺序检查："
+    echo "    1. 云服务器安全组是否放行 80、443（阿里云/腾讯云控制台，脚本改不了）"
+    echo "    2. 域名解析是否指向本机公网 IP（dig +short ${DOMAIN}）"
+    echo "    3. sudo ${SELF_CMD} status    # 会做 DNS / Nginx / 端口检查"
   else
     log_warn "HTTPS 未成功，应用已回退到 IP:${PORT} 访问"
     log_warn "检查域名解析、80 端口与安全组后，重跑本命令即可"
