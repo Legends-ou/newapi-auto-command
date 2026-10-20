@@ -111,9 +111,16 @@ log_err()  { printf '%s[错误]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
 die()      { log_err "$*"; exit 1; }
 step()     { printf '\n%s==> %s%s\n' "$C_CYAN" "$*" "$C_RESET"; }
 
+have_tty() {
+  # /dev/tty 存在不代表有控制终端，要真的尝试打开。
+  { : < /dev/tty; } 2>/dev/null || return 1
+  { : > /dev/tty; } 2>/dev/null || return 1
+  return 0
+}
+
 prompt_confirm() {
   local prompt="$1" reply=""
-  if [ -r /dev/tty ]; then
+  if have_tty; then
     # 通过管道执行时 stdin 是脚本正文，必须从终端读，否则会把代码当成回答。
     printf '%s' "$prompt" > /dev/tty
     read -r reply < /dev/tty || reply=""
@@ -143,6 +150,10 @@ Sub2API 一键部署 / 卸载脚本（Debian / Ubuntu）
 
 用法：
   bash deploy.sh [命令] [选项]
+
+  直接运行（不带参数）会显示交互菜单：
+    sudo bash deploy.sh                # 菜单：1 安装 / 2 状态 / 3 升级 / 4 卸载 ...
+    sudo bash deploy.sh install        # 跳过菜单，直接安装（脚本化用）
 
   通过 curl 执行时，命令与选项要放在 bash -s -- 之后：
     curl -sSL <脚本地址> | sudo bash                      # 安装
@@ -1788,9 +1799,8 @@ cmd_passwd() {
   echo "        可在后台退出全部会话，或改 JWT_SECRET 后执行 restart。"
 }
 
-main() {
-  parse_args "$@"
-  case "$ACTION" in
+dispatch() {
+  case "$1" in
     install)   cmd_install ;;
     upgrade)   cmd_upgrade ;;
     status)    cmd_status ;;
@@ -1801,6 +1811,72 @@ main() {
     logs)      cmd_logs ;;
     clean)     cmd_clean ;;
   esac
+}
+
+run_menu() {
+  [ "$(id -u)" -eq 0 ] || die "请用 root 运行，例如：sudo ${SELF_CMD}"
+
+  local choice="" again="" state=""
+  while true; do
+    state="未安装"
+    if [ -x "${INSTALL_DIR}/sub2api" ]; then
+      state="已安装 $("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
+    fi
+
+    echo ""
+    echo "=============================================="
+    echo "        Sub2API 一键部署 / 卸载"
+    echo "=============================================="
+    echo ""
+    echo "  当前状态：${state}"
+    echo ""
+    echo "  1) 安装 / 重装（自动使用最新版）"
+    echo "  2) 查看状态"
+    echo "  3) 升级到最新版"
+    echo "  4) 卸载"
+    echo "  5) 重置管理员密码"
+    echo "  6) 查看凭据"
+    echo "  7) 重启应用"
+    echo "  8) 查看日志"
+    echo "  9) 清理旧版本备份"
+    echo "  0) 退出"
+    echo ""
+
+    printf '请选择 [0-9]: ' > /dev/tty
+    read -r choice < /dev/tty || exit 0
+
+    case "$choice" in
+      1) dispatch install ;;
+      2) dispatch status ;;
+      3) dispatch upgrade ;;
+      4) dispatch uninstall ;;
+      5) dispatch passwd ;;
+      6) dispatch show ;;
+      7) dispatch restart ;;
+      8) dispatch logs ;;
+      9) dispatch clean ;;
+      0) exit 0 ;;
+      *) echo "无效选择：${choice}" ;;
+    esac
+
+    printf '\n按回车返回菜单（q 退出）: ' > /dev/tty
+    read -r again < /dev/tty || exit 0
+    case "$again" in
+      q|Q) exit 0 ;;
+    esac
+  done
+}
+
+main() {
+  # 不带任何参数且能访问终端时，先显示交互菜单；
+  # 带参数（含 install 等子命令）时直接执行，方便脚本化调用。
+  if [ "$#" -eq 0 ] && have_tty; then
+    run_menu
+    return 0
+  fi
+
+  parse_args "$@"
+  dispatch "$ACTION"
 }
 
 main "$@"
