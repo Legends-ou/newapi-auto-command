@@ -75,7 +75,9 @@ curl -sSL https://raw.githubusercontent.com/Legends-ou/sub2api-auto-command/main
 请选择 [0-9]:
 ```
 
-按数字执行，执行完回车可回到菜单。**自动化/脚本调用时请显式带命令**（如 `... | sudo bash -s -- install`），这样不会停下来等输入。
+按数字执行，执行完回车可回到菜单。**菜单占用独立全屏（备用屏）**，不污染你原来的终端内容；执行操作时会切回正常终端，所以安装日志仍留在可回翻的历史里，退出菜单后原样可见。
+
+**自动化/脚本调用时请显式带命令**（如 `... | sudo bash -s -- install`），这样不会停下来等输入。
 
 ### 方式一：一条命令（推荐）
 
@@ -210,6 +212,8 @@ sudo bash deploy.sh uninstall --keep-data   # 先把数据备份到 /var/backups
 | `--timezone <时区>` | 应用时区 | `Asia/Shanghai` |
 | `--yes` / `-y` | 卸载时跳过确认 | 关闭 |
 | `--keep-data` | 卸载前备份数据库与缓存数据 | 关闭 |
+| `--lines <行数>` | `logs` 命令显示的行数 | `100` |
+| `--verbose` | 显示 apt / certbot / 下载的完整输出（排障用） | 关闭 |
 
 ---
 

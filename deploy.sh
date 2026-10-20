@@ -54,6 +54,8 @@ TIMEZONE="Asia/Shanghai"
 KEEP_DATA="false"
 ASSUME_YES="false"
 LOG_LINES="100"
+VERBOSE="false"
+APT_LOG="/tmp/sub2api-deploy-apt.log"
 
 ARCH=""
 OS_ID=""
@@ -143,6 +145,29 @@ on_error() {
   exit "$code"
 }
 trap 'on_error $? $LINENO' ERR
+trap 'tui_leave' EXIT
+trap 'tui_leave; exit 130' INT TERM
+
+TUI_ACTIVE="false"
+
+tui_enter() {
+  have_tty || return 0
+  [ "${TUI_ACTIVE:-false}" = "true" ] && return 0
+  # 1049 = 进入备用屏（新"窗口"），退出时原终端内容原样恢复。
+  printf '\033[?1049h' > /dev/tty 2>/dev/null || return 0
+  TUI_ACTIVE="true"
+}
+
+tui_leave() {
+  [ "${TUI_ACTIVE:-false}" = "true" ] || return 0
+  printf '\033[?1049l' > /dev/tty 2>/dev/null || true
+  TUI_ACTIVE="false"
+}
+
+tui_clear() {
+  have_tty || return 0
+  printf '\033[H\033[2J' > /dev/tty 2>/dev/null || true
+}
 
 usage() {
   cat <<'EOF'
@@ -184,6 +209,7 @@ Sub2API 一键部署 / 卸载脚本（Debian / Ubuntu）
   --yes                      卸载时跳过确认
   --keep-data                卸载时先把数据库与缓存数据备份到 /var/backups 再删除
   --lines <行数>             logs 命令显示的日志行数（默认 100）
+  --verbose                  显示 apt / certbot 等底层命令的完整输出（排障用）
   -h, --help                 显示本帮助
 
 隔离说明：
@@ -218,6 +244,7 @@ parse_args() {
       --keep-data)       KEEP_DATA="true"; shift ;;
       --lines)           LOG_LINES="${2:-}"; shift 2 ;;
       --lines=*)         LOG_LINES="${1#*=}"; shift ;;
+      --verbose)         VERBOSE="true"; shift ;;
       --yes|-y)          ASSUME_YES="true"; shift ;;
       -h|--help)         usage; exit 0 ;;
       *) die "未知参数：$1（用 --help 查看用法）" ;;
@@ -286,16 +313,40 @@ detect_os() {
 }
 
 apt_update_once() {
-  if [ "$APT_UPDATED" = "false" ]; then
-    log_info "更新软件包索引..."
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq -o Acquire::Retries=3
-    APT_UPDATED="true"
+  [ "$APT_UPDATED" = "false" ] || return 0
+  log_info "更新软件包索引..."
+  if [ "$VERBOSE" = "true" ]; then
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update -qq -o Acquire::Retries=3
+  elif ! DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+      apt-get update -qq -o Acquire::Retries=3 >"$APT_LOG" 2>&1; then
+    log_err "更新软件包索引失败，详细输出："
+    tail -n 30 "$APT_LOG" >&2 || true
+    die "请检查网络或软件源后重试"
   fi
+  APT_UPDATED="true"
 }
 
 install_pkgs() {
   apt_update_once
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$@"
+  local pkgs="$*"
+  log_info "安装软件包：${pkgs}"
+
+  if [ "$VERBOSE" = "true" ]; then
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+      apt-get install -y -qq --no-install-recommends "$@"
+    log_ok "已安装：${pkgs}"
+    return 0
+  fi
+
+  # 默认把 apt/dpkg 的滚动输出收进日志，终端只留一行进度；
+  # 失败时再把日志尾部打出来，且不清屏，方便往上翻。
+  if ! DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+      apt-get install -y -qq --no-install-recommends "$@" >"$APT_LOG" 2>&1; then
+    log_err "安装失败，apt 输出（最后 40 行）："
+    tail -n 40 "$APT_LOG" >&2 || true
+    die "软件包安装失败：${pkgs}"
+  fi
+  log_ok "已安装：${pkgs}"
 }
 
 ensure_base_deps() {
@@ -569,7 +620,7 @@ build_redis() {
   local tmp
   tmp="$(mktemp -d)"
   log_info "下载并编译 Redis ${REDIS_BUILD_VERSION}..."
-  if ! curl -fL --retry 3 --connect-timeout 15 \
+  if ! curl -fsSL --retry 3 --connect-timeout 15 \
       -o "${tmp}/redis.tar.gz" \
       "https://download.redis.io/releases/redis-${REDIS_BUILD_VERSION}.tar.gz"; then
     rm -rf "$tmp"
@@ -785,7 +836,7 @@ download_binary() {
   fi
 
   log_info "下载 ${asset}"
-  if ! curl -fL --retry 3 --connect-timeout 15 -o "${tmp}/${asset}" "$url"; then
+  if ! curl -fsSL --retry 3 --connect-timeout 15 -o "${tmp}/${asset}" "$url"; then
     rm -rf "$tmp"
     die "下载失败：${url}
 如果服务器在国内，可以加加速前缀重试，例如：
@@ -1128,8 +1179,23 @@ setup_nginx() {
 
   if [ ! -f "${cert_dir}/fullchain.pem" ]; then
     log_info "正在申请 Let's Encrypt 证书（需要 ${DOMAIN} 已解析到本机、80 端口可访问）..."
-    if ! certbot certonly --nginx -d "$DOMAIN" -m "$TLS_EMAIL" \
-        --agree-tos --non-interactive --keep-until-expiring; then
+    local cert_ok="false"
+    if [ "$VERBOSE" = "true" ]; then
+      if certbot certonly --nginx -d "$DOMAIN" -m "$TLS_EMAIL" \
+          --agree-tos --non-interactive --keep-until-expiring; then
+        cert_ok="true"
+      fi
+    else
+      if certbot certonly --nginx -d "$DOMAIN" -m "$TLS_EMAIL" \
+          --agree-tos --non-interactive --keep-until-expiring >>"$APT_LOG" 2>&1; then
+        cert_ok="true"
+      fi
+    fi
+    if [ "$cert_ok" != "true" ]; then
+      if [ "$VERBOSE" != "true" ]; then
+        log_err "certbot 输出（最后 20 行）："
+        tail -n 20 "$APT_LOG" >&2 || true
+      fi
       log_warn "证书申请失败，暂时保留 HTTP 访问"
       log_warn "排查后重跑本脚本即可继续申请：sudo ${SELF_CMD} --domain ${DOMAIN} --email ${TLS_EMAIL}"
       rm -f "$tmp_http" "$tmp_tls"
@@ -1563,7 +1629,7 @@ cmd_uninstall() {
   if [ "$ASSUME_YES" != "true" ]; then
     if ! prompt_confirm '确认继续？(y/N) '; then
       log_info "已取消"
-      exit 0
+      return 0
     fi
   fi
 
@@ -1823,7 +1889,9 @@ run_menu() {
       state="已安装 $("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
     fi
 
-    echo ""
+    tui_enter
+    tui_clear
+
     echo "=============================================="
     echo "        Sub2API 一键部署 / 卸载"
     echo "=============================================="
@@ -1843,7 +1911,24 @@ run_menu() {
     echo ""
 
     printf '请选择 [0-9]: ' > /dev/tty
-    read -r choice < /dev/tty || exit 0
+    if ! read -r choice < /dev/tty; then
+      tui_leave
+      exit 0
+    fi
+
+    case "$choice" in
+      0)
+        tui_leave
+        exit 0
+        ;;
+      1|2|3|4|5|6|7|8|9) ;;
+      *)
+        continue
+        ;;
+    esac
+
+    # 执行动作前退出备用屏：操作输出留在正常终端历史里，退出后仍可回翻。
+    tui_leave
 
     case "$choice" in
       1) dispatch install ;;
@@ -1855,12 +1940,12 @@ run_menu() {
       7) dispatch restart ;;
       8) dispatch logs ;;
       9) dispatch clean ;;
-      0) exit 0 ;;
-      *) echo "无效选择：${choice}" ;;
     esac
 
     printf '\n按回车返回菜单（q 退出）: ' > /dev/tty
-    read -r again < /dev/tty || exit 0
+    if ! read -r again < /dev/tty; then
+      exit 0
+    fi
     case "$again" in
       q|Q) exit 0 ;;
     esac
