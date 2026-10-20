@@ -284,20 +284,42 @@ rand_hex() { openssl rand -hex "$1"; }
 
 env_get() {
   [ -f "$ENV_FILE" ] || return 0
-  sed -n "s/^$1=//p" "$ENV_FILE" | head -1
+  sed -n "s/^$1=//p" "$ENV_FILE" | sed -n '1p'
+}
+
+check_memory() {
+  local mem_kb swap_kb
+  mem_kb="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo 2>/dev/null || echo 0)"
+  swap_kb="$(awk '/^SwapTotal:/ { print $2 }' /proc/meminfo 2>/dev/null || echo 0)"
+  mem_kb="${mem_kb:-0}"
+  swap_kb="${swap_kb:-0}"
+  if [ "$mem_kb" -lt 1500000 ] && [ "$swap_kb" -eq 0 ]; then
+    log_warn "内存只有 $((mem_kb / 1024)) MB 且没有 swap；PostgreSQL + Redis + 应用可能触发 OOM。"
+    log_warn "建议先加 1GB swap：fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+  fi
 }
 
 # ---------------------------------------------------------------- 端口
 
 port_in_use() {
-  local port="$1"
+  local port="$1" out=""
   if command -v ss >/dev/null 2>&1; then
-    ss -lntH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}$"
+    out="$(ss -lntH 2>/dev/null)" || return 1
   elif command -v netstat >/dev/null 2>&1; then
-    netstat -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}$"
+    out="$(netstat -lnt 2>/dev/null)" || return 1
   else
     return 1
   fi
+  # 不用 grep -q / head：它们提前退出会让上游吃到 SIGPIPE，
+  # 在 pipefail 下被误判为失败（真机踩过）。
+  printf '%s\n' "$out" | awk -v p=":${port}" '
+    {
+      n = split($0, a, " ")
+      for (i = 1; i <= n; i++) {
+        if (a[i] ~ (p "$")) { found = 1 }
+      }
+    }
+    END { exit !found }'
 }
 
 # 从起始端口向后找空闲端口；找不到就返回起始端口（由调用方负责报错）
@@ -362,7 +384,7 @@ pg_cluster_exists() {
 }
 
 pg_cluster_port_of() {
-  pg_lsclusters -h 2>/dev/null | awk -v c="$PG_CLUSTER_NAME" '$2 == c { print $3; exit }'
+  pg_lsclusters -h 2>/dev/null | awk -v c="$PG_CLUSTER_NAME" '$2 == c { print $3 }' | sed -n '1p'
 }
 
 add_pgdg_repo() {
@@ -409,7 +431,7 @@ ensure_pg_cluster() {
   fi
 
   if pg_cluster_exists; then
-    ST_PG_VERSION="$(pg_lsclusters -h 2>/dev/null | awk -v c="$PG_CLUSTER_NAME" '$2 == c { print $1; exit }')"
+    ST_PG_VERSION="$(pg_lsclusters -h 2>/dev/null | awk -v c="$PG_CLUSTER_NAME" '$2 == c { print $1 }' | sed -n '1p')"
     ST_PG_CLUSTER="$PG_CLUSTER_NAME"
     ST_PG_PORT="$(pg_cluster_port_of)"
     log_info "独立集群 ${ST_PG_VERSION}/${PG_CLUSTER_NAME} 已存在（端口 ${ST_PG_PORT}），复用"
@@ -478,12 +500,14 @@ ensure_database() {
 # ---------------------------------------------------------------- Redis（独立实例）
 
 redis_major() {
-  redis-server --version 2>/dev/null | sed -nE 's/.*v=([0-9]+)\..*/\1/p' | head -1
+  redis-server --version 2>/dev/null | sed -nE 's/.*v=([0-9]+)\..*/\1/p' | sed -n '1p'
 }
 
 apt_candidate_major() {
   local cand
-  cand="$(apt-cache policy redis-server 2>/dev/null | awk '/Candidate:/ { print $2; exit }')"
+  # 不用 awk 'exit'：提前退出会让 apt-cache 收到 SIGPIPE，在 pipefail 下变成 141。
+  cand="$(apt-cache policy redis-server 2>/dev/null \
+    | sed -n 's/^ *Candidate: *//p' | sed -n '1p')"
   [ -n "$cand" ] || { printf '0'; return 0; }
   cand="${cand#*:}"
   printf '%s' "${cand%%.*}"
@@ -594,8 +618,8 @@ logfile ""
 loglevel notice
 maxmemory-policy noeviction
 EOF
-  chmod 0600 "$REDIS_CONF"
-  chown root:root "$REDIS_CONF"
+  chmod 0640 "$REDIS_CONF"
+  chown "root:${SERVICE_USER}" "$REDIS_CONF"
   umask 022
 }
 
@@ -649,7 +673,8 @@ ensure_redis_instance() {
   [ -n "$cli" ] || cli="${INSTALL_DIR}/redis/bin/redis-cli"
 
   for i in $(seq 1 20); do
-    if "$cli" -h 127.0.0.1 -p "$ST_REDIS_PORT" -a "$REDIS_PASS" --no-auth-warning ping 2>/dev/null | grep -q PONG; then
+    if "$cli" -h 127.0.0.1 -p "$ST_REDIS_PORT" -a "$REDIS_PASS" --no-auth-warning ping 2>/dev/null \
+      | awk '/PONG/ { found = 1 } END { exit !found }'; then
       log_ok "独立 Redis 已就绪（127.0.0.1:${ST_REDIS_PORT}，仅本机，已设密码）"
       return 0
     fi
@@ -681,6 +706,9 @@ ensure_user_dirs() {
   install -d -m 0750 "$DATA_DIR"
   install -d -m 0750 "$CONF_DIR"
   chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
+  # 目录属组给服务用户：Redis 进程以 sub2api 身份运行，需要能进入 /etc/sub2api
+  # 读取自己的 redis.conf；env 与凭据文件仍是 600 root，服务用户读不到。
+  chown "root:${SERVICE_USER}" "$CONF_DIR"
   chmod 0750 "$CONF_DIR"
 }
 
@@ -695,7 +723,7 @@ resolve_version() {
     log_info "查询最新版本..."
     local raw=""
     raw="$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 40 "$api" 2>/dev/null || true)"
-    tag="$(printf '%s' "$raw" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+    tag="$(printf '%s' "$raw" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')"
     [ -n "$tag" ] || die "获取最新版本失败。请检查网络，或用 --version vX.Y.Z 指定版本"
   fi
 
@@ -1130,7 +1158,7 @@ write_credentials() {
 print_summary() {
   local url="$1"
   local version=""
-  version="$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | head -1 || true)"
+  version="$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
 
   echo ""
   printf '%s==============================================%s\n' "$C_GREEN" "$C_RESET"
@@ -1273,7 +1301,7 @@ verify_clean() {
     fi
   }
   check_unit() {
-    if systemctl list-unit-files 2>/dev/null | grep -q "^$1"; then
+    if systemctl list-unit-files 2>/dev/null | awk -v u="$1" '$1 == u { found = 1 } END { exit !found }'; then
       log_warn "残留服务单元：$1"
       issues=$((issues + 1))
     fi
@@ -1309,6 +1337,7 @@ verify_clean() {
 cmd_install() {
   require_root "$@"
   detect_os
+  check_memory
   ensure_base_deps
   load_state
   # 重装时如果没显式指定域名，沿用上次的域名配置（避免意外从 HTTPS 退回 IP 直连）
@@ -1363,7 +1392,8 @@ cmd_install() {
       nginx_ok="false"
       log_warn "Nginx 配置未完成，回退为监听 0.0.0.0，改用 IP:${PORT} 访问"
       write_env_file "0.0.0.0"
-      if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+      if command -v ufw >/dev/null 2>&1 \
+        && ufw status 2>/dev/null | awk '/Status: active/ { found = 1 } END { exit !found }'; then
         ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
         ST_UFW_PORTS="${ST_UFW_PORTS:+${ST_UFW_PORTS},}${PORT}/tcp"
       fi
@@ -1396,7 +1426,7 @@ cmd_install() {
 
 open_firewall() {
   command -v ufw >/dev/null 2>&1 || return 0
-  ufw status 2>/dev/null | grep -q 'Status: active' || return 0
+  ufw status 2>/dev/null | awk '/Status: active/ { found = 1 } END { exit !found }' || return 0
 
   if [ -n "$DOMAIN" ]; then
     ufw allow 80/tcp >/dev/null 2>&1 || true
@@ -1422,7 +1452,7 @@ cmd_upgrade() {
 
   resolve_version
   local current
-  current="$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | head -1 || true)"
+  current="$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
   log_info "当前版本：${current:-未知}"
 
   step "升级"
@@ -1432,7 +1462,7 @@ cmd_upgrade() {
   chown "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_DIR}/sub2api"
   start_service
 
-  log_ok "升级完成：$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | head -1 || true)"
+  log_ok "升级完成：$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
   log_info "回滚方式：cp ${INSTALL_DIR}/sub2api.bak ${INSTALL_DIR}/sub2api && systemctl restart ${SERVICE}"
 }
 
@@ -1445,7 +1475,7 @@ cmd_status() {
   [ -n "$PORT" ] || PORT="8080"
 
   echo ""
-  echo "版本：$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | head -1 || true)"
+  echo "版本：$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
   echo "端口：${PORT}"
   echo ""
   systemctl is-active "$SERVICE" >/dev/null 2>&1 && echo "应用：运行中" || echo "应用：未运行"
@@ -1461,7 +1491,7 @@ cmd_status() {
     echo "健康检查：失败"
   fi
   echo ""
-  systemctl status "$SERVICE" --no-pager -l | head -20 || true
+  systemctl status "$SERVICE" --no-pager -l | sed -n '1,20p' || true
 }
 
 cmd_uninstall() {
@@ -1557,7 +1587,7 @@ cmd_uninstall() {
   step "移除独立 PostgreSQL 集群"
   if pg_lsclusters -h 2>/dev/null | awk -v c="$PG_CLUSTER_NAME" '$2 == c { found = 1 } END { exit !found }'; then
     local ver
-    ver="$(pg_lsclusters -h 2>/dev/null | awk -v c="$PG_CLUSTER_NAME" '$2 == c { print $1; exit }')"
+    ver="$(pg_lsclusters -h 2>/dev/null | awk -v c="$PG_CLUSTER_NAME" '$2 == c { print $1 }' | sed -n '1p')"
     if pg_dropcluster "$ver" "$PG_CLUSTER_NAME" --stop; then
       log_info "已删除集群 ${ver}/${PG_CLUSTER_NAME}（其他集群不受影响）"
     else
