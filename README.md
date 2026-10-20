@@ -50,7 +50,7 @@
 ### 方式一：一条命令（推荐）
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/<你的账号>/sub2api-deploy/main/deploy.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/Legends-ou/sub2api-auto-command/main/deploy.sh | sudo bash
 ```
 
 `curl | bash` 与 `sudo` 同时使用时，交互确认会从终端读取（不是从脚本管道），因此卸载确认等提示都能正常工作。
