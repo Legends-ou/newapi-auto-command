@@ -162,6 +162,7 @@ TUI_ACTIVE="false"
 
 tui_enter() {
   have_tty || return 0
+  [ "${SUB2API_NO_TUI:-0}" = "1" ] && return 0
   [ "${TUI_ACTIVE:-false}" = "true" ] && return 0
   # 1049 = 进入备用屏（新"窗口"），退出时原终端内容原样恢复。
   printf '\033[?1049h' > /dev/tty 2>/dev/null || return 0
@@ -186,8 +187,8 @@ Sub2API 一键部署 / 卸载脚本（Debian / Ubuntu）
 用法：
   bash deploy.sh [命令] [选项]
 
-  直接运行（不带参数）会显示交互菜单：
-    sudo bash deploy.sh                # 菜单：1 安装 / 2 状态 / 3 升级 / 4 卸载 ...
+  首次运行（未安装）直接安装；已安装后不带参数运行会显示交互菜单：
+    sudo bash deploy.sh                # 首次=安装；已装=菜单
     sudo bash deploy.sh install        # 跳过菜单，直接安装（脚本化用）
 
   通过 curl 执行时，命令与选项要放在 bash -s -- 之后：
@@ -1583,6 +1584,10 @@ verify_clean() {
   check_path "$INSTALL_DIR"
   check_path "$CONF_DIR"
   check_path "$SUB_BIN"
+  check_path "$APT_LOG"
+  if [ -n "${ST_PG_VERSION:-}" ]; then
+    check_path "/var/log/postgresql/postgresql-${ST_PG_VERSION}-${PG_CLUSTER_NAME}.log"
+  fi
   check_unit "${SERVICE}.service"
   check_unit "${REDIS_UNIT}.service"
 
@@ -1964,6 +1969,8 @@ cmd_uninstall() {
     local ver
     ver="$(pg_lsclusters -h 2>/dev/null | awk -v c="$PG_CLUSTER_NAME" '$2 == c { print $1 }' | sed -n '1p')"
     if pg_dropcluster "$ver" "$PG_CLUSTER_NAME" --stop; then
+      # 集群日志不在 pg_dropcluster 的清理范围内
+      rm -f "/var/log/postgresql/postgresql-${ver}-${PG_CLUSTER_NAME}.log"
       log_info "已删除集群 ${ver}/${PG_CLUSTER_NAME}（其他集群不受影响）"
     else
       log_warn "删除集群失败，请手动执行：pg_dropcluster ${ver} ${PG_CLUSTER_NAME} --stop"
@@ -1976,6 +1983,8 @@ cmd_uninstall() {
   rm -rf "$INSTALL_DIR"
   rm -rf "$CONF_DIR"
   rm -f "$SUB_BIN"
+  rm -f "$APT_LOG"
+  rmdir /usr/share/postgresql-common/pgdg 2>/dev/null || true
   userdel "$SERVICE_USER" 2>/dev/null || true
 
   if [ -n "$ufw_ports" ] && command -v ufw >/dev/null 2>&1; then
@@ -2186,6 +2195,20 @@ dispatch() {
   esac
 }
 
+menu_read() {
+  # 优先从终端读；某些环境 /dev/tty 可打开但读会立刻失败，再退回 stdin。
+  local __var="$1" __val=""
+  if read -r __val < /dev/tty 2>/dev/null; then
+    printf -v "$__var" '%s' "$__val"
+    return 0
+  fi
+  if [ -t 0 ] && read -r __val 2>/dev/null; then
+    printf -v "$__var" '%s' "$__val"
+    return 0
+  fi
+  return 1
+}
+
 menu_quit() {
   tui_leave
   echo ""
@@ -2193,6 +2216,21 @@ menu_quit() {
   echo "安装/卸载细节：/tmp/sub2api-deploy-apt.log"
   echo ""
   exit 0
+}
+
+menu_unreadable() {
+  tui_leave
+  echo ""
+  echo "无法从当前终端读取输入，交互菜单不可用（常见于不支持全屏的 Web 终端）。"
+  echo ""
+  echo "请改用带参数的命令，例如："
+  echo "  sudo bash ${LOCAL_SCRIPT} install"
+  echo "  sudo bash ${LOCAL_SCRIPT} status"
+  echo "  sudo bash ${LOCAL_SCRIPT} uninstall"
+  echo ""
+  echo "如果只是想关掉全屏界面再试：SUB2API_NO_TUI=1 sudo bash ${LOCAL_SCRIPT}"
+  echo ""
+  exit 1
 }
 
 run_menu() {
@@ -2227,9 +2265,14 @@ run_menu() {
     echo "  0) 退出"
     echo ""
 
-    printf '请选择: ' > /dev/tty
-    if ! read -r choice < /dev/tty; then
-      menu_quit
+    printf '请选择: ' > /dev/tty 2>/dev/null || true
+    if ! menu_read choice; then
+      # 有些终端进入备用屏后读不到输入：退出全屏再试一次。
+      tui_leave
+      printf '请选择: ' > /dev/tty 2>/dev/null || true
+      if ! menu_read choice; then
+        menu_unreadable
+      fi
     fi
 
     case "$choice" in
@@ -2253,9 +2296,9 @@ run_menu() {
       10) dispatch clean ;;
     esac
 
-    printf '\n按回车返回菜单（q 退出）: ' > /dev/tty
-    if ! read -r again < /dev/tty; then
-      menu_quit
+    printf '\n按回车返回菜单（q 退出）: ' > /dev/tty 2>/dev/null || true
+    if ! menu_read again; then
+      menu_unreadable
     fi
     case "$again" in
       q|Q) menu_quit ;;
@@ -2264,10 +2307,14 @@ run_menu() {
 }
 
 main() {
-  # 不带任何参数且能访问终端时，先显示交互菜单；
-  # 带参数（含 install 等子命令）时直接执行，方便脚本化调用。
+  # 不带参数且能访问终端时：未安装则直接安装（首次运行），已安装则进菜单。
   if [ "$#" -eq 0 ] && have_tty; then
-    run_menu
+    if [ -x "${INSTALL_DIR}/sub2api" ]; then
+      run_menu
+    else
+      FROM_MENU="true"   # 交互式安装：会询问是否配域名
+      dispatch install
+    fi
     return 0
   fi
 
