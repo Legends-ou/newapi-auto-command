@@ -513,11 +513,17 @@ save_state() {
 
 # ---------------------------------------------------------------- PostgreSQL（独立集群）
 
+has_pg_tools() {
+  command -v pg_lsclusters >/dev/null 2>&1
+}
+
 pg_cluster_exists() {
+  has_pg_tools || return 1
   pg_lsclusters -h 2>/dev/null | awk -v c="$PG_CLUSTER_NAME" '$2 == c { found = 1 } END { exit !found }'
 }
 
 pg_cluster_port_of() {
+  has_pg_tools || return 0
   pg_lsclusters -h 2>/dev/null | awk -v c="$PG_CLUSTER_NAME" '$2 == c { print $3 }' | sed -n '1p'
 }
 
@@ -541,6 +547,8 @@ add_pgdg_repo() {
 }
 
 installed_pg_major() {
+  # 全新机器上 /usr/lib/postgresql 还不存在，ls 会失败；不能因此中断。
+  [ -d /usr/lib/postgresql ] || return 0
   ls -1 /usr/lib/postgresql 2>/dev/null | awk '/^[0-9]+$/ { print }' | sort -rn | sed -n '1p'
 }
 
@@ -553,6 +561,8 @@ apt_pg_candidate_major() {
 }
 
 pg_clusters_snapshot() {
+  # 新机器上还没装 PostgreSQL 时，pg_lsclusters 不存在，不能因此中断安装。
+  has_pg_tools || return 0
   pg_lsclusters -h 2>/dev/null | awk '{ print $1 "/" $2 }' | sort
 }
 
@@ -1503,6 +1513,7 @@ nginx_other_sites() {
 }
 
 other_pg_clusters() {
+  has_pg_tools || { printf '0'; return 0; }
   pg_lsclusters -h 2>/dev/null | awk -v c="$PG_CLUSTER_NAME" '$2 != c { n++ } END { print n + 0 }'
 }
 
