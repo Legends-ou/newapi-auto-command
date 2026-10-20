@@ -99,6 +99,49 @@ sudo bash deploy.sh status                                        # 看状态
 
 ---
 
+## 命令一览
+
+装好之后的日常操作。`curl` 形式每次都会取最新脚本；已经下载过 `deploy.sh` 的，用右边一列即可。
+
+| 操作 | curl 形式 | 下载后形式 |
+| --- | --- | --- |
+| 安装 / 重装 | `curl -sSL <脚本地址> \| sudo bash` | `sudo bash deploy.sh` |
+| 升级到最新版 | `curl -sSL <脚本地址> \| sudo bash -s -- upgrade` | `sudo bash deploy.sh upgrade` |
+| 查看状态 | `curl -sSL <脚本地址> \| sudo bash -s -- status` | `sudo bash deploy.sh status` |
+| 查看凭据 | `curl -sSL <脚本地址> \| sudo bash -s -- show` | `sudo bash deploy.sh show` |
+| 重置管理员密码 | `curl -sSL <脚本地址> \| sudo bash -s -- passwd` | `sudo bash deploy.sh passwd` |
+| 重启应用 | `curl -sSL <脚本地址> \| sudo bash -s -- restart` | `sudo bash deploy.sh restart` |
+| 跟踪日志 | `curl -sSL <脚本地址> \| sudo bash -s -- logs` | `sudo bash deploy.sh logs` |
+| 删除旧版本备份 | `curl -sSL <脚本地址> \| sudo bash -s -- clean` | `sudo bash deploy.sh clean` |
+| 卸载 | `curl -sSL <脚本地址> \| sudo bash -s -- uninstall` | `sudo bash deploy.sh uninstall` |
+| 卸载并备份数据 | `curl -sSL <脚本地址> \| sudo bash -s -- uninstall --keep-data` | `sudo bash deploy.sh uninstall --keep-data` |
+
+其中 `<脚本地址>` = `https://raw.githubusercontent.com/Legends-ou/sub2api-auto-command/main/deploy.sh`。
+
+`-s --` 的作用：让 bash 从标准输入读脚本，同时把它后面的内容作为脚本参数传给脚本；漏掉 `--` 时 `uninstall` 会被当成 bash 自己的参数。
+
+### 重置管理员密码
+
+```bash
+sudo bash deploy.sh passwd                              # 随机生成新密码并打印
+sudo bash deploy.sh passwd --admin-password '新密码'     # 指定密码（8–72 字节）
+sudo bash deploy.sh passwd --admin-email x@y.com         # 多个管理员时指定账号
+```
+
+直接改数据库里的 bcrypt 哈希，**忘记密码时也能救**。注意：已登录的浏览器会话不会因此失效，怀疑他人仍在线时，可在后台退出全部会话，或更换 `JWT_SECRET` 后 `restart`。
+
+首次执行会安装 `apache2-utils`（用 `htpasswd` 生成哈希），卸载时会一并清理。
+
+### 旧版本备份
+
+升级/重装时会把旧二进制复制为 `/opt/sub2api/sub2api.bak`，用 `cp -f` **覆盖同一个文件**，无论升级多少次都只占一份（约一个二进制的大小）。不需要回滚时：
+
+```bash
+sudo bash deploy.sh clean     # 删除 .bak 并显示释放了多少
+```
+
+---
+
 ## 卸载
 
 ```bash

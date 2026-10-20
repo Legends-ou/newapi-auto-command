@@ -53,6 +53,7 @@ GH_PROXY=""
 TIMEZONE="Asia/Shanghai"
 KEEP_DATA="false"
 ASSUME_YES="false"
+LOG_LINES="100"
 
 ARCH=""
 OS_ID=""
@@ -92,6 +93,7 @@ ST_UFW_PORTS=""
 ST_SERVER_PORT=""
 ST_PGDG_REPO_CREATED="false"
 ST_REDIS_REPO_CREATED="false"
+ST_EXTRA_PKGS=""
 
 # ---------------------------------------------------------------- 输出
 
@@ -142,11 +144,22 @@ Sub2API 一键部署 / 卸载脚本（Debian / Ubuntu）
 用法：
   bash deploy.sh [命令] [选项]
 
+  通过 curl 执行时，命令与选项要放在 bash -s -- 之后：
+    curl -sSL <脚本地址> | sudo bash                      # 安装
+    curl -sSL <脚本地址> | sudo bash -s -- upgrade        # 升级
+    curl -sSL <脚本地址> | sudo bash -s -- status         # 状态
+    curl -sSL <脚本地址> | sudo bash -s -- uninstall      # 卸载
+
 命令：
   install      安装（默认）
   upgrade      只替换二进制，保留数据
   status       查看服务状态
   uninstall    卸载并清理本脚本创建的全部资源
+  passwd       重置管理员密码（忘记密码时用）
+  show         查看当前凭据、端口与访问地址
+  restart      重启应用（不动数据库与缓存）
+  logs         跟踪应用日志（默认最近 100 行）
+  clean        删除旧版本备份 sub2api.bak
 
 选项：
   --port <端口>              Sub2API 监听端口（默认 8080）
@@ -159,6 +172,7 @@ Sub2API 一键部署 / 卸载脚本（Debian / Ubuntu）
   --timezone <时区>          默认 Asia/Shanghai
   --yes                      卸载时跳过确认
   --keep-data                卸载时先把数据库与缓存数据备份到 /var/backups 再删除
+  --lines <行数>             logs 命令显示的日志行数（默认 100）
   -h, --help                 显示本帮助
 
 隔离说明：
@@ -173,7 +187,7 @@ EOF
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
-      install|upgrade|status|uninstall) ACTION="$1"; shift ;;
+      install|upgrade|status|uninstall|passwd|show|restart|logs|clean) ACTION="$1"; shift ;;
       --port)            PORT="${2:-}"; PORT_SET="true"; shift 2 ;;
       --port=*)          PORT="${1#*=}"; PORT_SET="true"; shift ;;
       --domain)          DOMAIN="${2:-}"; shift 2 ;;
@@ -191,6 +205,8 @@ parse_args() {
       --timezone)        TIMEZONE="${2:-}"; shift 2 ;;
       --timezone=*)      TIMEZONE="${1#*=}"; shift ;;
       --keep-data)       KEEP_DATA="true"; shift ;;
+      --lines)           LOG_LINES="${2:-}"; shift 2 ;;
+      --lines=*)         LOG_LINES="${1#*=}"; shift ;;
       --yes|-y)          ASSUME_YES="true"; shift ;;
       -h|--help)         usage; exit 0 ;;
       *) die "未知参数：$1（用 --help 查看用法）" ;;
@@ -198,8 +214,12 @@ parse_args() {
   done
 
   case "$ACTION" in
-    install|upgrade|status|uninstall) ;;
+    install|upgrade|status|uninstall|passwd|show|restart|logs|clean) ;;
     *) die "未知命令：$ACTION" ;;
+  esac
+
+  case "$LOG_LINES" in
+    ''|*[!0-9]*) die "--lines 必须是数字" ;;
   esac
 
   [ -n "$PORT" ] || die "--port 不能为空"
@@ -372,6 +392,7 @@ save_state() {
     printf 'ST_SERVER_PORT=%s\n' "${ST_SERVER_PORT:-}"
     printf 'ST_PGDG_REPO_CREATED=%s\n' "${ST_PGDG_REPO_CREATED:-false}"
     printf 'ST_REDIS_REPO_CREATED=%s\n' "${ST_REDIS_REPO_CREATED:-false}"
+    printf 'ST_EXTRA_PKGS=%s\n' "${ST_EXTRA_PKGS:-}"
     umask 022
   } > "$STATE_FILE"
   chmod 0600 "$STATE_FILE"
@@ -1628,6 +1649,14 @@ cmd_uninstall() {
   purge_pg_packages
   purge_nginx_packages
 
+  if [ -n "${ST_EXTRA_PKGS:-}" ]; then
+    log_info "卸载本脚本额外安装的软件包：${ST_EXTRA_PKGS}"
+    # 这里按空格拆分是预期行为（ST_EXTRA_PKGS 是内部记录的包名列表）。
+    # shellcheck disable=SC2086
+    apt-get purge -y -qq ${ST_EXTRA_PKGS} >/dev/null 2>&1 \
+      || log_warn "额外软件包卸载未完全成功（${ST_EXTRA_PKGS}）"
+  fi
+
   verify_clean
 
   if [ "${ST_REDIS_BUILT_PACKAGES:-false}" = "true" ]; then
@@ -1641,6 +1670,124 @@ cmd_uninstall() {
   echo ""
 }
 
+cmd_show() {
+  require_root "$@"
+  [ -f "$CRED_FILE" ] || die "找不到 ${CRED_FILE}（可能尚未安装或已卸载）"
+  load_state
+
+  echo ""
+  sed -n '1,60p' "$CRED_FILE"
+  echo ""
+  local app_port
+  app_port="$(env_get SERVER_PORT)"
+  if [ -n "$app_port" ]; then
+    echo "应用端口：${app_port}"
+  fi
+  if [ -n "${ST_PG_PORT:-}" ] || [ -n "${ST_REDIS_PORT:-}" ]; then
+    echo "数据库端口：${ST_PG_PORT:-?}，缓存端口：${ST_REDIS_PORT:-?}"
+  fi
+  echo ""
+}
+
+cmd_restart() {
+  require_root "$@"
+  [ -x "${INSTALL_DIR}/sub2api" ] || die "尚未安装"
+
+  load_state
+  PORT="$(env_get SERVER_PORT)"
+  [ -n "$PORT" ] || PORT="${ST_SERVER_PORT:-8080}"
+
+  step "重启应用"
+  systemctl restart "$SERVICE"
+  if wait_health; then
+    log_ok "已重启，健康检查通过"
+  else
+    journalctl -u "$SERVICE" -n 40 --no-pager || true
+    die "重启后健康检查失败"
+  fi
+}
+
+cmd_logs() {
+  require_root "$@"
+  [ -x "${INSTALL_DIR}/sub2api" ] || die "尚未安装"
+  log_info "跟踪日志（最近 ${LOG_LINES} 行，Ctrl+C 退出）"
+  journalctl -u "$SERVICE" -n "$LOG_LINES" -f
+}
+
+cmd_clean() {
+  require_root "$@"
+
+  local bak="${INSTALL_DIR}/sub2api.bak"
+  if [ ! -f "$bak" ]; then
+    log_info "没有旧版本备份，无需清理"
+    return 0
+  fi
+
+  local size
+  size="$(du -h "$bak" 2>/dev/null | awk '{ print $1 }')"
+  rm -f "$bak"
+  log_ok "已删除 ${bak}（释放 ${size:-未知}）"
+}
+
+cmd_passwd() {
+  require_root "$@"
+  [ -x "${INSTALL_DIR}/sub2api" ] || die "尚未安装，无法重置密码"
+  load_state
+
+  local pg_port="${ST_PG_PORT:-}"
+  [ -n "$pg_port" ] || pg_port="$(env_get DATABASE_PORT)"
+  [ -n "$pg_port" ] || die "找不到数据库端口，安装状态可能已损坏"
+
+  local email="${ARG_ADMIN_EMAIL:-$(env_get ADMIN_EMAIL)}"
+  [ -n "$email" ] || die "找不到管理员账号；请用 --admin-email 指定"
+  case "$email" in
+    *"'"*) die "邮箱里不能包含单引号" ;;
+  esac
+
+  local pass="${ARG_ADMIN_PASSWORD:-}"
+  [ -n "$pass" ] || pass="$(rand_hex 12)"
+  local len=${#pass}
+  if [ "$len" -lt 8 ] || [ "$len" -gt 72 ]; then
+    die "密码长度必须在 8-72 字节之间（当前 ${len}）"
+  fi
+  case "$pass" in
+    *$'\n'*|*$'\r'*) die "密码不能包含换行" ;;
+  esac
+
+  step "重置管理员密码"
+  if ! command -v htpasswd >/dev/null 2>&1; then
+    log_info "安装 apache2-utils（用于生成 bcrypt 哈希）..."
+    install_pkgs apache2-utils
+    case " ${ST_EXTRA_PKGS:-} " in
+      *" apache2-utils "*) ;;
+      *) ST_EXTRA_PKGS="${ST_EXTRA_PKGS:+${ST_EXTRA_PKGS} }apache2-utils" ;;
+    esac
+    save_state
+  fi
+
+  local hash
+  hash="$(htpasswd -bnBC 10 '' "$pass" 2>/dev/null | sed 's/^://' | tr -d '\r\n')"
+  case "$hash" in
+    \$2*) ;;
+    *) die "生成 bcrypt 哈希失败，未修改任何数据" ;;
+  esac
+
+  local updated
+  updated="$(printf "UPDATE users SET password_hash = '%s', updated_at = now() WHERE email = '%s' RETURNING email;\n" \
+      "$hash" "$email" \
+      | su - postgres -c "psql -p ${pg_port} -d ${SERVICE_USER} -v ON_ERROR_STOP=1 -tA")" \
+    || die "数据库更新失败"
+
+  [ -n "$updated" ] || die "数据库里没有账号 ${email}；可用 show 查看当前管理员账号"
+
+  log_ok "管理员密码已重置：${email}"
+  echo ""
+  echo "  新密码：${pass}"
+  echo ""
+  echo "  提示：已登录的浏览器会话不会自动失效。若怀疑他人仍在登录，"
+  echo "        可在后台退出全部会话，或改 JWT_SECRET 后执行 restart。"
+}
+
 main() {
   parse_args "$@"
   case "$ACTION" in
@@ -1648,6 +1795,11 @@ main() {
     upgrade)   cmd_upgrade ;;
     status)    cmd_status ;;
     uninstall) cmd_uninstall ;;
+    passwd)    cmd_passwd ;;
+    show)      cmd_show ;;
+    restart)   cmd_restart ;;
+    logs)      cmd_logs ;;
+    clean)     cmd_clean ;;
   esac
 }
 
