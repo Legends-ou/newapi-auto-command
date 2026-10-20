@@ -1361,6 +1361,23 @@ setup_nginx() {
         log_err "certbot 输出（最后 20 行）："
         tail -n 20 "$APT_LOG" >&2 || true
       fi
+
+      # 证书失败最常见的两个原因：DNS 没指向本机、80 端口不通。先查解析。
+      local dns_ips="" pub=""
+      dns_ips="$(getent ahosts "$DOMAIN" 2>/dev/null | awk '{ print $1 }' | sort -u | tr '\n' ' ')"
+      pub="$(get_public_ip || true)"
+      if [ -n "$dns_ips" ] && [ -n "$pub" ]; then
+        case " ${dns_ips} " in
+          *" ${pub} "*) ;;
+          *)
+            log_warn "域名当前解析到：${dns_ips}"
+            log_warn "本机公网 IP 是：${pub}"
+            log_warn "两者不一致，Let's Encrypt 会去旧地址验证，证书必然失败。"
+            log_warn "请把 A 记录改成 ${pub}，等解析生效后再执行：sudo ${SELF_CMD} domain"
+            ;;
+        esac
+      fi
+
       log_warn "证书申请失败，暂时保留 HTTP 访问"
       log_warn "排查后重跑本脚本即可继续申请：sudo ${SELF_CMD} --domain ${DOMAIN} --email ${TLS_EMAIL}"
       rm -f "$tmp_http" "$tmp_tls"
@@ -1429,7 +1446,7 @@ write_credentials() {
 print_summary() {
   local url="$1"
   local version=""
-  version="$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
+  version="$(app_version)"
 
   echo ""
   printf '%s==============================================%s\n' "$C_GREEN" "$C_RESET"
@@ -1456,11 +1473,14 @@ print_summary() {
   echo "    journalctl -u ${SERVICE} -f"
   echo "    systemctl restart ${SERVICE}"
   echo ""
-  if [ -n "$DOMAIN" ]; then
+  if [ -n "$DOMAIN" ] && [ "${HTTPS_OK:-false}" = "true" ]; then
     echo "  首次登录后请在后台「系统设置」里确认站点地址为 https://${DOMAIN}"
+  elif [ -n "$DOMAIN" ]; then
+    echo "  域名 ${DOMAIN} 已配置，但 HTTPS 没成功（当前仍用上面的 IP:端口 访问）。"
+    echo "  修好 DNS 解析或 80 端口后执行：sudo ${SELF_CMD} domain"
   else
-    echo "  提示：当前用 IP:端口 直接访问。要绑定域名并自动上 HTTPS，重跑："
-    echo "    sudo ${SELF_CMD} --domain 你的域名 --email 你的邮箱"
+    echo "  提示：当前用 IP:端口 直接访问。要绑定域名并自动上 HTTPS，执行："
+    echo "    sudo ${SELF_CMD} domain"
   fi
   echo ""
   echo "  完全卸载（不留痕迹）："
@@ -1675,8 +1695,10 @@ cmd_install() {
   if [ -n "$DOMAIN" ]; then
     if ensure_domain_setup false; then
       url="https://${DOMAIN}"
+      HTTPS_OK="true"
     else
       nginx_ok="false"
+      HTTPS_OK="false"
       local ip=""
       ip="$(get_public_ip || true)"
       [ -n "$ip" ] || ip="服务器IP"
@@ -1695,7 +1717,7 @@ cmd_install() {
   print_summary "$url"
   install_launcher
   if [ "$nginx_ok" = "false" ]; then
-    log_warn "HTTPS 没配成功：先按上面的提示排查，再重跑 --domain 即可"
+    log_warn "HTTPS 没配成功：按上面的提示排查后，执行 sudo ${SELF_CMD} domain 重试"
   fi
 
   if [ "$IS_FIRST_INSTALL" = "false" ]; then
@@ -1731,7 +1753,7 @@ cmd_upgrade() {
 
   resolve_version
   local current
-  current="$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
+  current="$(app_version)"
   log_info "当前版本：${current:-未知}"
 
   step "升级"
@@ -1744,8 +1766,16 @@ cmd_upgrade() {
   # 顺手更新本地脚本副本，sub 下次打开就是新版
   save_self >/dev/null 2>&1 || true
 
-  log_ok "升级完成：$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
+  log_ok "升级完成：$(app_version)"
   log_info "回滚方式：cp ${INSTALL_DIR}/sub2api.bak ${INSTALL_DIR}/sub2api && systemctl restart ${SERVICE}"
+}
+
+app_version() {
+  local out="" v=""
+  out="$("${INSTALL_DIR}/sub2api" --version 2>/dev/null || true)"
+  v="$(printf '%s' "$out" | sed -n 's/.*Sub2API \([0-9][^ ]*\).*/\1/p' | sed -n '1p')"
+  [ -n "$v" ] || v="$(printf '%s' "$out" | sed -n '1p')"
+  printf '%s' "$v"
 }
 
 access_url() {
@@ -1849,7 +1879,7 @@ cmd_status() {
   if [ -n "$domain" ]; then
     echo "域名    ：${domain}"
   fi
-  echo "版本    ：$("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
+  echo "版本    ：$(app_version)"
   echo "端口    ：${PORT}"
   echo ""
   systemctl is-active "$SERVICE" >/dev/null 2>&1 && echo "应用      ：运行中" || echo "应用      ：未运行"
@@ -2240,7 +2270,7 @@ run_menu() {
   while true; do
     state="未安装"
     if [ -x "${INSTALL_DIR}/sub2api" ]; then
-      state="已安装 $("${INSTALL_DIR}/sub2api" --version 2>/dev/null | sed -n '1p' || true)"
+      state="已安装 $(app_version)"
     fi
 
     tui_enter
