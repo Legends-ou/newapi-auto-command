@@ -20,7 +20,7 @@
 
 | 资源 | 做法 | 卸载时 |
 | --- | --- | --- |
-| PostgreSQL | 创建**独立集群** `16/sub2api`，独立端口（5433 起自动找空闲）、独立数据目录 | `pg_dropcluster` 只删这个集群 |
+| PostgreSQL | 创建**独立集群** `<版本>/sub2api`（Ubuntu 24.04 用自带的 16，Debian 12 用 15），独立端口（5433 起自动找空闲）、独立数据目录 | `pg_dropcluster` 只删这个集群 |
 | Redis | 起**独立实例** `sub2api-redis`，独立端口（6380 起）、独立配置 `/etc/sub2api/redis.conf`、独立数据 `/opt/sub2api/redis-data` | 停服务、删单元与数据目录 |
 | 系统 Redis 配置 | **完全不碰** `/etc/redis/redis.conf`，不重启 `redis-server` | 原文件与状态不变 |
 | 系统 PostgreSQL | **不 enable、不 restart** 全局 `postgresql` 服务，不碰其他集群 | 其他集群照常运行 |
@@ -41,7 +41,7 @@
 | 架构 | x86_64（amd64）、arm64 |
 | 权限 | root（`sudo`） |
 | 初始化系统 | systemd |
-| 网络 | 能访问 GitHub Releases、PGDG（国内建议配 `--gh-proxy`） |
+| 网络 | 能访问 GitHub Releases 与系统软件源（国内建议配 `--gh-proxy`） |
 
 ---
 
@@ -62,20 +62,22 @@ curl -sSL https://raw.githubusercontent.com/Legends-ou/sub2api-auto-command/main
   当前状态：未安装
 
   1) 安装 / 重装（自动使用最新版）
-  2) 查看状态
-  3) 升级到最新版
-  4) 卸载
-  5) 重置管理员密码
-  6) 查看凭据
-  7) 重启应用
-  8) 查看日志
-  9) 清理旧版本备份
+  2) 配置域名 / HTTPS
+  3) 查看状态
+  4) 升级到最新版
+  5) 卸载
+  6) 重置管理员密码
+  7) 查看凭据
+  8) 重启应用
+  9) 查看日志
+ 10) 清理旧版本备份
   0) 退出
 
-请选择 [0-9]:
+请选择:
 ```
 
-按数字执行，执行完回车可回到菜单。**整个会话都在独立全屏（备用屏）里**：菜单和操作输出都留在这一屏，不污染原来的终端；只有选 `0` 或 `q` 退出时才还原，退出后能看到进入菜单前的终端内容。
+按数字执行，执行完回车可回到菜单。**从菜单选「1) 安装」时会询问是否绑定域名并启用 HTTPS**，答 y 再填域名和邮箱；直接带 `--domain` 则不询问。
+**整个会话都在独立全屏（备用屏）里**：菜单和操作输出都留在这一屏，不污染原来的终端；只有选 `0` 或 `q` 退出时才还原，退出后能看到进入菜单前的终端内容。
 
 因为操作输出在备用屏里，退出后不会留在滚动历史中，需要回查时用：
 
@@ -148,6 +150,7 @@ sudo bash deploy.sh status                                        # 看状态
 | --- | --- | --- |
 | 安装 / 重装 | `curl -sSL <脚本地址> \| sudo bash` | `sudo bash deploy.sh` |
 | 升级到最新版 | `curl -sSL <脚本地址> \| sudo bash -s -- upgrade` | `sudo bash deploy.sh upgrade` |
+| 配置域名 / HTTPS | `curl -sSL <脚本地址> \| sudo bash -s -- domain` | `sudo bash deploy.sh domain` |
 | 查看状态 | `curl -sSL <脚本地址> \| sudo bash -s -- status` | `sudo bash deploy.sh status` |
 | 查看凭据 | `curl -sSL <脚本地址> \| sudo bash -s -- show` | `sudo bash deploy.sh show` |
 | 重置管理员密码 | `curl -sSL <脚本地址> \| sudo bash -s -- passwd` | `sudo bash deploy.sh passwd` |
@@ -240,7 +243,7 @@ sudo bash deploy.sh uninstall --keep-data   # 先把数据备份到 /var/backups
 ```bash
 systemctl status sub2api
 systemctl status sub2api-redis
-pg_lsclusters                 # 应看到 16/sub2api
+pg_lsclusters                 # 应看到 <版本>/sub2api
 journalctl -u sub2api -n 100 --no-pager
 ```
 
@@ -251,8 +254,8 @@ journalctl -u sub2api -n 100 --no-pager
 1. 检查系统版本、架构、systemd、root 权限
 2. 安装基础工具；准备系统用户与目录
 3. 生成或沿用数据库密码、Redis 密码、JWT、TOTP、管理员账号
-4. 需要时添加 PGDG 源并安装 PostgreSQL 16，清掉顺带产生的空 `16/main`
-5. 创建独立集群 `16/sub2api`（自动找空闲端口），建库建账号
+4. 优先用发行版自带的 PostgreSQL（24.04 是 16、Debian 12 是 15）；低于 15 才添加 PGDG 源。装完清掉顺带产生的空 `main` 集群
+5. 创建独立集群 `<版本>/sub2api`（自动找空闲端口），建库建账号
 6. 准备 Redis 二进制（系统已有 7+ 就复用；已有低于 7 的则编译独立副本，不动系统包）
 7. 创建独立 Redis 实例（配置、数据、systemd 单元都在本项目名下）
 8. 下载 Release 二进制并校验 SHA-256

@@ -55,15 +55,18 @@ KEEP_DATA="false"
 ASSUME_YES="false"
 LOG_LINES="100"
 VERBOSE="false"
+FROM_MENU="false"
 APT_LOG="/tmp/sub2api-deploy-apt.log"
 
 ARCH=""
 OS_ID=""
 OS_CODENAME=""
 APT_UPDATED="false"
+# 给 apt 加超时：镜像不可达时快速失败，而不是无限等待。
+APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
 REDIS_BIN=""
 STATE_LOADED="false"
-PG16_WAS_PRESENT="true"
+PG_CLUSTERS_BEFORE=""
 
 # 既支持「下载后执行」，也支持 `curl ... | sudo bash`：
 # 管道执行时 $0 是 bash、BASH_SOURCE 不是文件，这里统一出一个可复制的重跑命令。
@@ -193,6 +196,7 @@ Sub2API 一键部署 / 卸载脚本（Debian / Ubuntu）
   upgrade      只替换二进制，保留数据
   status       查看服务状态
   uninstall    卸载并清理本脚本创建的全部资源
+  domain       配置域名并启用 HTTPS（已安装后随时可用）
   passwd       重置管理员密码（忘记密码时用）
   show         查看当前凭据、端口与访问地址
   restart      重启应用（不动数据库与缓存）
@@ -226,7 +230,7 @@ EOF
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
-      install|upgrade|status|uninstall|passwd|show|restart|logs|clean) ACTION="$1"; shift ;;
+      install|upgrade|status|uninstall|domain|passwd|show|restart|logs|clean) ACTION="$1"; shift ;;
       --port)            PORT="${2:-}"; PORT_SET="true"; shift 2 ;;
       --port=*)          PORT="${1#*=}"; PORT_SET="true"; shift ;;
       --domain)          DOMAIN="${2:-}"; shift 2 ;;
@@ -254,7 +258,7 @@ parse_args() {
   done
 
   case "$ACTION" in
-    install|upgrade|status|uninstall|passwd|show|restart|logs|clean) ;;
+    install|upgrade|status|uninstall|domain|passwd|show|restart|logs|clean) ;;
     *) die "未知命令：$ACTION" ;;
   esac
 
@@ -318,9 +322,10 @@ apt_update_once() {
   [ "$APT_UPDATED" = "false" ] || return 0
   log_info "更新软件包索引..."
   if [ "$VERBOSE" = "true" ]; then
-    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update -qq -o Acquire::Retries=3
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+      apt-get "${APT_OPTS[@]}" update -qq
   elif ! DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
-      apt-get update -qq -o Acquire::Retries=3 >"$APT_LOG" 2>&1; then
+      apt-get "${APT_OPTS[@]}" update -qq >"$APT_LOG" 2>&1; then
     log_err "更新软件包索引失败，详细输出："
     tail -n 30 "$APT_LOG" >&2 || true
     die "请检查网络或软件源后重试"
@@ -335,7 +340,7 @@ install_pkgs() {
 
   if [ "$VERBOSE" = "true" ]; then
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
-      apt-get install -y -qq --no-install-recommends "$@"
+      apt-get "${APT_OPTS[@]}" install -y -qq --no-install-recommends "$@"
     log_ok "已安装：${pkgs}"
     return 0
   fi
@@ -343,7 +348,7 @@ install_pkgs() {
   # 默认把 apt/dpkg 的滚动输出收进日志，终端只留一行进度；
   # 失败时再把日志尾部打出来，且不清屏，方便往上翻。
   if ! DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
-      apt-get install -y -qq --no-install-recommends "$@" >"$APT_LOG" 2>&1; then
+      apt-get "${APT_OPTS[@]}" install -y -qq --no-install-recommends "$@" >"$APT_LOG" 2>&1; then
     log_err "安装失败，apt 输出（最后 40 行）："
     tail -n 40 "$APT_LOG" >&2 || true
     die "软件包安装失败：${pkgs}"
@@ -475,8 +480,15 @@ pg_cluster_port_of() {
 add_pgdg_repo() {
   log_info "添加 PostgreSQL 官方源（PGDG）..."
   install -d -m 0755 /usr/share/postgresql-common/pgdg
-  curl -fsSL --retry 3 -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-    https://www.postgresql.org/media/keys/ACCC4CF8.asc
+
+  log_info "下载 PGDG 公钥（超时 60 秒）..."
+  if ! curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 --retry-delay 2 \
+      -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+      https://www.postgresql.org/media/keys/ACCC4CF8.asc; then
+    die "下载 PGDG 公钥失败（网络不通或超时）。
+请确认服务器能访问 https://www.postgresql.org ；网络恢复后重跑即可。"
+  fi
+
   printf 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
     "$OS_CODENAME" > /etc/apt/sources.list.d/pgdg.list
   ST_PGDG_REPO_CREATED="true"
@@ -484,36 +496,73 @@ add_pgdg_repo() {
   apt_update_once
 }
 
-ensure_pg_packages() {
-  # 记录安装前是否已有 16 版本集群：用于识别「装包时自动带出来的空集群」。
-  PG16_WAS_PRESENT="false"
-  if pg_lsclusters -h 2>/dev/null | awk '$1 == 16 { found = 1 } END { exit !found }'; then
-    PG16_WAS_PRESENT="true"
-  fi
+installed_pg_major() {
+  ls -1 /usr/lib/postgresql 2>/dev/null | awk '/^[0-9]+$/ { print }' | sort -rn | sed -n '1p'
+}
 
-  if dpkg -s "postgresql-${PG_VERSION_DEFAULT}" >/dev/null 2>&1; then
-    log_info "PostgreSQL ${PG_VERSION_DEFAULT} 软件包已存在，直接复用"
+apt_pg_candidate_major() {
+  local cand
+  cand="$(apt-cache policy postgresql 2>/dev/null | sed -n 's/^ *Candidate: *//p' | sed -n '1p')"
+  [ -n "$cand" ] || { printf '0'; return 0; }
+  cand="${cand#*:}"
+  printf '%s' "${cand%%.*}"
+}
+
+pg_clusters_snapshot() {
+  pg_lsclusters -h 2>/dev/null | awk '{ print $1 "/" $2 }' | sort
+}
+
+ensure_pg_packages() {
+  # 记录安装前已有的集群，用于识别「装包时自动带出来的空 main 集群」。
+  PG_CLUSTERS_BEFORE="$(pg_clusters_snapshot)"
+
+  local installed cand
+  installed="$(installed_pg_major)"
+  if [ -n "$installed" ] && [ "$installed" -ge 15 ]; then
+    PG_VERSION_DEFAULT="$installed"
+    log_info "已安装 PostgreSQL ${installed}，直接复用"
     return 0
   fi
 
-  if ! grep -qs 'apt.postgresql.org' /etc/apt/sources.list.d/pgdg.list \
-    || [ ! -f /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc ]; then
-    add_pgdg_repo
+  apt_update_once
+  cand="$(apt_pg_candidate_major)"
+
+  if [ -n "$cand" ] && [ "$cand" -ge 15 ]; then
+    # Ubuntu 24.04 自带 16、Debian 12 自带 15，直接用发行版源，无需访问 postgresql.org。
+    log_info "系统软件源已提供 PostgreSQL ${cand}，直接安装（不添加 PGDG 源）"
+    install_pkgs postgresql postgresql-contrib
+    PG_VERSION_DEFAULT="$cand"
+  else
+    log_info "系统软件源只提供 PostgreSQL ${cand:-未知}，改用 PGDG 官方源"
+    if [ ! -f /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc ] \
+      || ! grep -qs 'apt.postgresql.org' /etc/apt/sources.list.d/pgdg.list; then
+      add_pgdg_repo
+    fi
+    install_pkgs "postgresql-${PG_VERSION_DEFAULT}" "postgresql-client-${PG_VERSION_DEFAULT}" "postgresql-contrib-${PG_VERSION_DEFAULT}"
   fi
 
-  install_pkgs "postgresql-${PG_VERSION_DEFAULT}" "postgresql-client-${PG_VERSION_DEFAULT}" "postgresql-contrib-${PG_VERSION_DEFAULT}"
   ST_PG_PACKAGES_CREATED="true"
+
+  installed="$(installed_pg_major)"
+  if [ -n "$installed" ]; then
+    PG_VERSION_DEFAULT="$installed"
+  fi
   log_ok "已安装 PostgreSQL ${PG_VERSION_DEFAULT}"
 }
 
 ensure_pg_cluster() {
-  # 安装包时 Debian/Ubuntu 会自动创建一个 16/main 空集群并占用 5432；
-  # 如果装之前没有 16 集群，这个 main 是本次安装的副产物，删掉以免多占端口。
-  if [ "${PG16_WAS_PRESENT:-true}" = "false" ] \
-    && pg_lsclusters -h 2>/dev/null | awk '$1 == 16 && $2 == "main" { found = 1 } END { exit !found }'; then
-    log_info "清理安装包时自动创建的空集群 16/main（不影响其他版本集群）"
-    pg_dropcluster 16 main --stop >/dev/null 2>&1 || true
-  fi
+  # 安装包时 Debian/Ubuntu 通常会自动创建一个 main 空集群并占用 5432；
+  # 如果装之前没有，这个 main 是本次安装的副产物，删掉以免多占端口。
+  local main_key="${PG_VERSION_DEFAULT}/main"
+  case "${PG_CLUSTERS_BEFORE:-}" in
+    *"$main_key"*) ;;
+    *)
+      if pg_lsclusters -h 2>/dev/null | awk -v v="$PG_VERSION_DEFAULT" '$1 == v && $2 == "main" { found = 1 } END { exit !found }'; then
+        log_info "清理安装包时自动创建的空集群 ${main_key}（不影响其他版本集群）"
+        pg_dropcluster "$PG_VERSION_DEFAULT" main --stop >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
 
   if pg_cluster_exists; then
     ST_PG_VERSION="$(pg_lsclusters -h 2>/dev/null | awk -v c="$PG_CLUSTER_NAME" '$2 == c { print $1 }' | sed -n '1p')"
@@ -601,8 +650,12 @@ apt_candidate_major() {
 add_redis_repo() {
   log_info "添加 Redis 官方源..."
   install_pkgs ca-certificates curl gnupg
-  curl -fsSL --retry 3 https://packages.redis.io/gpg \
-    | gpg --dearmor --yes -o /usr/share/keyrings/redis-archive-keyring.gpg
+  log_info "下载 Redis 公钥（超时 60 秒）..."
+  if ! curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 --retry-delay 2 \
+      https://packages.redis.io/gpg \
+      | gpg --dearmor --yes -o /usr/share/keyrings/redis-archive-keyring.gpg; then
+    die "下载 Redis 公钥失败（网络不通或超时）。请确认服务器能访问 https://packages.redis.io"
+  fi
   chmod 0644 /usr/share/keyrings/redis-archive-keyring.gpg
   printf 'deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb %s main\n' \
     "$OS_CODENAME" > /etc/apt/sources.list.d/redis.list
@@ -622,7 +675,7 @@ build_redis() {
   local tmp
   tmp="$(mktemp -d)"
   log_info "下载并编译 Redis ${REDIS_BUILD_VERSION}..."
-  if ! curl -fsSL --retry 3 --connect-timeout 15 \
+  if ! curl -fsSL --retry 3 --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
       -o "${tmp}/redis.tar.gz" \
       "https://download.redis.io/releases/redis-${REDIS_BUILD_VERSION}.tar.gz"; then
     rm -rf "$tmp"
@@ -838,7 +891,8 @@ download_binary() {
   fi
 
   log_info "下载 ${asset}"
-  if ! curl -fsSL --retry 3 --connect-timeout 15 -o "${tmp}/${asset}" "$url"; then
+  if ! curl -fsSL --retry 3 --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+      -o "${tmp}/${asset}" "$url"; then
     rm -rf "$tmp"
     die "下载失败：${url}
 如果服务器在国内，可以加加速前缀重试，例如：
@@ -1017,6 +1071,68 @@ wait_health() {
     fi
     sleep 3
   done
+  return 1
+}
+
+prompt_domain_config() {
+  local ans="" d="" e=""
+  printf '是否绑定域名并启用 HTTPS？(y/N) ' > /dev/tty
+  read -r ans < /dev/tty || ans=""
+  case "$ans" in
+    [Yy]*) ;;
+    *) return 1 ;;
+  esac
+
+  while true; do
+    printf '  域名（例如 api.example.com）: ' > /dev/tty
+    read -r d < /dev/tty || d=""
+    case "$d" in
+      ''|*[!A-Za-z0-9.-]*) printf '  域名只能含字母、数字、点和连字符，请重试\n' > /dev/tty ;;
+      *) break ;;
+    esac
+  done
+
+  while true; do
+    printf '  证书通知邮箱: ' > /dev/tty
+    read -r e < /dev/tty || e=""
+    case "$e" in
+      *@*.*) break ;;
+      *) printf '  邮箱格式不对，请重试\n' > /dev/tty ;;
+    esac
+  done
+
+  DOMAIN="$d"
+  TLS_EMAIL="$e"
+  printf '  将使用 https://%s（需域名已解析到本机、80/443 可访问）\n' "$DOMAIN" > /dev/tty
+  return 0
+}
+
+# 把应用切到域名模式并配置 Nginx/证书；失败则回退 0.0.0.0。
+# $1 = true 时先改监听地址并重启（已有安装在运行的情况）。
+ensure_domain_setup() {
+  local restart_first="$1"
+
+  if [ "$restart_first" = "true" ]; then
+    write_env_file "127.0.0.1"
+    systemctl restart "$SERVICE"
+    wait_health || log_err "服务重启后健康检查未通过：journalctl -u ${SERVICE} -n 60 --no-pager"
+  fi
+
+  if setup_nginx; then
+    save_state
+    return 0
+  fi
+
+  log_warn "Nginx 配置未完成，回退为监听 0.0.0.0，改用 IP:${PORT} 访问"
+  write_env_file "0.0.0.0"
+  if command -v ufw >/dev/null 2>&1 \
+    && ufw status 2>/dev/null | awk '/Status: active/ { found = 1 } END { exit !found }'; then
+    ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
+    ST_UFW_PORTS="${ST_UFW_PORTS:+${ST_UFW_PORTS},}${PORT}/tcp"
+  fi
+  systemctl restart "$SERVICE"
+  wait_health || log_err "服务重启后健康检查未通过：journalctl -u ${SERVICE} -n 60 --no-pager"
+  save_state
   return 1
 }
 
@@ -1334,12 +1450,14 @@ purge_pg_packages() {
   if [ "${ST_PG_PACKAGES_CREATED:-false}" != "true" ]; then
     return 0
   fi
+  # 实际安装的版本可能是 15（Debian 12）或 16（Ubuntu 24.04 / PGDG）。
+  local pg_ver="${ST_PG_VERSION:-$PG_VERSION_DEFAULT}"
   if [ "$(other_pg_clusters)" -gt 0 ]; then
-    log_warn "机器上还有其他 PostgreSQL 集群，保留 postgresql-${PG_VERSION_DEFAULT} 软件包"
+    log_warn "机器上还有其他 PostgreSQL 集群，保留 postgresql-${pg_ver} 软件包"
     return 0
   fi
-  log_info "卸载脚本安装的 PostgreSQL 软件包..."
-  apt-get purge -y -qq "postgresql-${PG_VERSION_DEFAULT}" "postgresql-client-${PG_VERSION_DEFAULT}" "postgresql-contrib-${PG_VERSION_DEFAULT}" \
+  log_info "卸载脚本安装的 PostgreSQL 软件包（版本 ${pg_ver}）..."
+  apt-get "${APT_OPTS[@]}" purge -y -qq "postgresql-${pg_ver}" "postgresql-client-${pg_ver}" "postgresql-contrib-${pg_ver}" \
     >/dev/null 2>&1 || log_warn "PostgreSQL 软件包卸载未完全成功，可手动检查 dpkg -l | grep postgresql"
 
   # 机器上已无任何其他 PostgreSQL 版本时，连公共包一起清掉，避免 dpkg 残留。
@@ -1348,7 +1466,7 @@ purge_pg_packages() {
     | grep -vE '^(postgresql-common|postgresql-client-common)$' | wc -l || true)"
   others="${others//[[:space:]]/}"
   if [ "${others:-0}" -eq 0 ]; then
-    apt-get purge -y -qq postgresql-common postgresql-client-common >/dev/null 2>&1 || true
+    apt-get "${APT_OPTS[@]}" purge -y -qq postgresql-common postgresql-client-common >/dev/null 2>&1 || true
     if [ "${ST_PGDG_REPO_CREATED:-false}" = "true" ]; then
       rm -f /etc/apt/sources.list.d/pgdg.list /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
       log_info "已移除本脚本添加的 PGDG 软件源"
@@ -1365,7 +1483,7 @@ purge_redis_packages() {
     return 0
   fi
   log_info "卸载脚本安装的 Redis 软件包..."
-  apt-get purge -y -qq redis redis-server redis-tools >/dev/null 2>&1 \
+  apt-get "${APT_OPTS[@]}" purge -y -qq redis redis-server redis-tools >/dev/null 2>&1 \
     || log_warn "Redis 软件包卸载未完全成功，可手动检查 dpkg -l | grep redis"
 
   if [ "${ST_REDIS_REPO_CREATED:-false}" = "true" ]; then
@@ -1388,11 +1506,11 @@ purge_nginx_packages() {
     return 0
   fi
   log_info "卸载脚本安装的 Nginx 软件包..."
-  apt-get purge -y -qq nginx nginx-common >/dev/null 2>&1 \
+  apt-get "${APT_OPTS[@]}" purge -y -qq nginx nginx-common >/dev/null 2>&1 \
     || log_warn "Nginx 软件包卸载未完全成功，可手动检查 dpkg -l | grep nginx"
 
   if [ "${ST_CERTBOT_PACKAGES_CREATED:-false}" = "true" ]; then
-    apt-get purge -y -qq certbot python3-certbot-nginx >/dev/null 2>&1 \
+    apt-get "${APT_OPTS[@]}" purge -y -qq certbot python3-certbot-nginx >/dev/null 2>&1 \
       || log_warn "certbot 卸载未完全成功，可手动检查 dpkg -l | grep certbot"
   fi
 }
@@ -1446,6 +1564,14 @@ cmd_install() {
   require_root "$@"
   detect_os
   check_memory
+
+  # 交互安装（从菜单进入）时询问是否配域名；带 --domain 或非交互环境则跳过。
+  if [ -z "$DOMAIN" ] && [ "$FROM_MENU" = "true" ] && have_tty; then
+    if prompt_domain_config; then
+      log_info "已选择域名模式：${DOMAIN}"
+    fi
+  fi
+
   ensure_base_deps
   load_state
   # 重装时如果没显式指定域名，沿用上次的域名配置（避免意外从 HTTPS 退回 IP 直连）
@@ -1494,19 +1620,10 @@ cmd_install() {
 
   local url="" nginx_ok="true"
   if [ -n "$DOMAIN" ]; then
-    if setup_nginx; then
+    if ensure_domain_setup false; then
       url="https://${DOMAIN}"
     else
       nginx_ok="false"
-      log_warn "Nginx 配置未完成，回退为监听 0.0.0.0，改用 IP:${PORT} 访问"
-      write_env_file "0.0.0.0"
-      if command -v ufw >/dev/null 2>&1 \
-        && ufw status 2>/dev/null | awk '/Status: active/ { found = 1 } END { exit !found }'; then
-        ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
-        ST_UFW_PORTS="${ST_UFW_PORTS:+${ST_UFW_PORTS},}${PORT}/tcp"
-      fi
-      systemctl restart "$SERVICE"
-      wait_health || log_err "服务重启后健康检查未通过：journalctl -u ${SERVICE} -n 60 --no-pager"
       local ip=""
       ip="$(get_public_ip || true)"
       [ -n "$ip" ] || ip="服务器IP"
@@ -1732,7 +1849,7 @@ cmd_uninstall() {
     log_info "卸载本脚本额外安装的软件包：${ST_EXTRA_PKGS}"
     # 这里按空格拆分是预期行为（ST_EXTRA_PKGS 是内部记录的包名列表）。
     # shellcheck disable=SC2086
-    apt-get purge -y -qq ${ST_EXTRA_PKGS} >/dev/null 2>&1 \
+    apt-get "${APT_OPTS[@]}" purge -y -qq ${ST_EXTRA_PKGS} >/dev/null 2>&1 \
       || log_warn "额外软件包卸载未完全成功（${ST_EXTRA_PKGS}）"
   fi
 
@@ -1747,6 +1864,37 @@ cmd_uninstall() {
   echo ""
   echo "  如果这台机器上原本就有 PostgreSQL / Redis / Nginx，它们没有被改动，仍在正常运行。"
   echo ""
+}
+
+cmd_domain() {
+  require_root "$@"
+  [ -x "${INSTALL_DIR}/sub2api" ] || die "尚未安装，请先完成安装"
+  load_state
+
+  if [ -z "$DOMAIN" ]; then
+    if ! have_tty; then
+      die "请用 --domain 与 --email 指定，例如：sudo ${SELF_CMD} domain --domain api.example.com --email you@example.com"
+    fi
+    if ! prompt_domain_config; then
+      log_info "已取消"
+      return 0
+    fi
+  fi
+  [ -n "$TLS_EMAIL" ] || die "域名模式必须提供证书通知邮箱（--email）"
+
+  PORT="$(env_get SERVER_PORT)"
+  [ -n "$PORT" ] || PORT="${ST_SERVER_PORT:-8080}"
+
+  step "配置域名与 HTTPS"
+  if ensure_domain_setup true; then
+    log_ok "已启用：https://${DOMAIN}"
+    echo ""
+    echo "  账号密码不变，可用 show 查看。"
+    echo "  建议在后台「系统设置」里把站点地址改成 https://${DOMAIN}"
+  else
+    log_warn "HTTPS 未成功，应用已回退到 IP:${PORT} 访问"
+    log_warn "检查域名解析、80 端口与安全组后，重跑本命令即可"
+  fi
 }
 
 cmd_show() {
@@ -1873,6 +2021,7 @@ dispatch() {
     upgrade)   cmd_upgrade ;;
     status)    cmd_status ;;
     uninstall) cmd_uninstall ;;
+    domain)    cmd_domain ;;
     passwd)    cmd_passwd ;;
     show)      cmd_show ;;
     restart)   cmd_restart ;;
@@ -1910,39 +2059,42 @@ run_menu() {
     echo "  当前状态：${state}"
     echo ""
     echo "  1) 安装 / 重装（自动使用最新版）"
-    echo "  2) 查看状态"
-    echo "  3) 升级到最新版"
-    echo "  4) 卸载"
-    echo "  5) 重置管理员密码"
-    echo "  6) 查看凭据"
-    echo "  7) 重启应用"
-    echo "  8) 查看日志"
-    echo "  9) 清理旧版本备份"
+    echo "  2) 配置域名 / HTTPS"
+    echo "  3) 查看状态"
+    echo "  4) 升级到最新版"
+    echo "  5) 卸载"
+    echo "  6) 重置管理员密码"
+    echo "  7) 查看凭据"
+    echo "  8) 重启应用"
+    echo "  9) 查看日志"
+    echo " 10) 清理旧版本备份"
     echo "  0) 退出"
     echo ""
 
-    printf '请选择 [0-9]: ' > /dev/tty
+    printf '请选择: ' > /dev/tty
     if ! read -r choice < /dev/tty; then
       menu_quit
     fi
 
     case "$choice" in
       0) menu_quit ;;
-      1|2|3|4|5|6|7|8|9) ;;
+      1|2|3|4|5|6|7|8|9|10) ;;
       *) continue ;;
     esac
 
     # 全程留在全屏界面里执行，只有退出菜单才还原原终端。
+    FROM_MENU="true"
     case "$choice" in
       1) dispatch install ;;
-      2) dispatch status ;;
-      3) dispatch upgrade ;;
-      4) dispatch uninstall ;;
-      5) dispatch passwd ;;
-      6) dispatch show ;;
-      7) dispatch restart ;;
-      8) dispatch logs ;;
-      9) dispatch clean ;;
+      2) dispatch domain ;;
+      3) dispatch status ;;
+      4) dispatch upgrade ;;
+      5) dispatch uninstall ;;
+      6) dispatch passwd ;;
+      7) dispatch show ;;
+      8) dispatch restart ;;
+      9) dispatch logs ;;
+      10) dispatch clean ;;
     esac
 
     printf '\n按回车返回菜单（q 退出）: ' > /dev/tty
