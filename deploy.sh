@@ -48,7 +48,7 @@ DOMAIN=""
 TLS_EMAIL=""
 ARG_ADMIN_EMAIL=""
 ARG_ADMIN_PASSWORD=""
-VERSION=""
+ARG_VERSION=""
 GH_PROXY=""
 TIMEZONE="Asia/Shanghai"
 KEEP_DATA="false"
@@ -184,8 +184,8 @@ parse_args() {
       --admin-email=*)   ARG_ADMIN_EMAIL="${1#*=}"; shift ;;
       --admin-password)  ARG_ADMIN_PASSWORD="${2:-}"; shift 2 ;;
       --admin-password=*) ARG_ADMIN_PASSWORD="${1#*=}"; shift ;;
-      --version)         VERSION="${2:-}"; shift 2 ;;
-      --version=*)       VERSION="${1#*=}"; shift ;;
+      --version)         ARG_VERSION="${2:-}"; shift 2 ;;
+      --version=*)       ARG_VERSION="${1#*=}"; shift ;;
       --gh-proxy)        GH_PROXY="${2:-}"; shift 2 ;;
       --gh-proxy=*)      GH_PROXY="${1#*=}"; shift ;;
       --timezone)        TIMEZONE="${2:-}"; shift 2 ;;
@@ -716,8 +716,10 @@ resolve_version() {
   local api="https://api.github.com/repos/${REPO}/releases/latest"
   local tag=""
 
-  if [ -n "$VERSION" ]; then
-    tag="$VERSION"
+  # 注意：变量名不能用 VERSION —— detect_os 里 `. /etc/os-release` 会把它
+  # 覆盖成系统版本（如 "24.04.3 LTS (Noble Numbat)"），真机踩过。
+  if [ -n "$ARG_VERSION" ]; then
+    tag="$ARG_VERSION"
     case "$tag" in v*) ;; *) tag="v${tag}" ;; esac
   else
     log_info "查询最新版本..."
@@ -726,6 +728,12 @@ resolve_version() {
     tag="$(printf '%s' "$raw" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')"
     [ -n "$tag" ] || die "获取最新版本失败。请检查网络，或用 --version vX.Y.Z 指定版本"
   fi
+
+  # 防御：曾经因为变量被 /etc/os-release 覆盖，把系统版本当成 tag。
+  case "$tag" in
+    v[0-9]*) ;;
+    *) die "版本号格式异常：${tag}（请用 --version vX.Y.Z 指定，例如 v1.2.3）" ;;
+  esac
 
   RELEASE_TAG="$tag"
   RELEASE_VER="${tag#v}"
