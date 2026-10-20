@@ -110,7 +110,8 @@ log_info() { printf '%s[信息]%s %s\n' "$C_BLUE" "$C_RESET" "$*"; }
 log_ok()   { printf '%s[完成]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
 log_warn() { printf '%s[注意]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 log_err()  { printf '%s[错误]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
-die()      { log_err "$*"; exit 1; }
+# 出错时先退出全屏界面，否则错误信息会随备用屏一起消失。
+die()      { tui_leave; log_err "$*"; exit 1; }
 step()     { printf '\n%s==> %s%s\n' "$C_CYAN" "$*" "$C_RESET"; }
 
 have_tty() {
@@ -139,6 +140,7 @@ prompt_confirm() {
 
 on_error() {
   local code=$1 line=$2
+  tui_leave
   log_err "脚本在第 ${line} 行失败（退出码 ${code}）。"
   log_err "应用日志：journalctl -u ${SERVICE} -n 80 --no-pager"
   log_err "如已装到一半，可重跑本命令继续，或用 uninstall 清理。"
@@ -1879,6 +1881,15 @@ dispatch() {
   esac
 }
 
+menu_quit() {
+  tui_leave
+  echo ""
+  echo "已退出菜单。应用日志：journalctl -u sub2api -n 50"
+  echo "安装/卸载细节：/tmp/sub2api-deploy-apt.log"
+  echo ""
+  exit 0
+}
+
 run_menu() {
   [ "$(id -u)" -eq 0 ] || die "请用 root 运行，例如：sudo ${SELF_CMD}"
 
@@ -1912,24 +1923,16 @@ run_menu() {
 
     printf '请选择 [0-9]: ' > /dev/tty
     if ! read -r choice < /dev/tty; then
-      tui_leave
-      exit 0
+      menu_quit
     fi
 
     case "$choice" in
-      0)
-        tui_leave
-        exit 0
-        ;;
+      0) menu_quit ;;
       1|2|3|4|5|6|7|8|9) ;;
-      *)
-        continue
-        ;;
+      *) continue ;;
     esac
 
-    # 执行动作前退出备用屏：操作输出留在正常终端历史里，退出后仍可回翻。
-    tui_leave
-
+    # 全程留在全屏界面里执行，只有退出菜单才还原原终端。
     case "$choice" in
       1) dispatch install ;;
       2) dispatch status ;;
@@ -1944,10 +1947,10 @@ run_menu() {
 
     printf '\n按回车返回菜单（q 退出）: ' > /dev/tty
     if ! read -r again < /dev/tty; then
-      exit 0
+      menu_quit
     fi
     case "$again" in
-      q|Q) exit 0 ;;
+      q|Q) menu_quit ;;
     esac
   done
 }
