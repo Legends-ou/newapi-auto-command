@@ -166,6 +166,7 @@ New API 一键部署 / 卸载脚本（Debian / Ubuntu）
   logs         跟踪应用日志（默认最近 100 行）
   clean        删除旧版本备份 new-api.bak
   cred         重新生成凭据文件（不重装）
+  cpa          安装 / 修复 CPA（不重装 New API）
   self-update  只更新脚本本身（不重装、不升级应用）
 
 选项：
@@ -194,7 +195,7 @@ EOF
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
-      install|upgrade|status|uninstall|domain|show|restart|logs|clean|cred|self-update) ACTION="$1"; shift ;;
+      install|upgrade|status|uninstall|domain|show|restart|logs|clean|cred|cpa|self-update) ACTION="$1"; shift ;;
       --port)            PORT="${2:-}"; PORT_SET="true"; shift 2 ;;
       --port=*)          PORT="${1#*=}"; PORT_SET="true"; shift ;;
       --domain)          DOMAIN="${2:-}"; shift 2 ;;
@@ -223,7 +224,7 @@ parse_args() {
   done
 
   case "$ACTION" in
-    install|upgrade|status|uninstall|domain|show|restart|logs|clean|cred|self-update) ;;
+    install|upgrade|status|uninstall|domain|show|restart|logs|clean|cred|cpa|self-update) ;;
     *) die "未知命令：$ACTION" ;;
   esac
 
@@ -1447,6 +1448,24 @@ cmd_domain() {
   fi
 }
 
+cmd_cpa() {
+  require_root "$@"
+  [ -x "${INSTALL_DIR}/new-api" ] || die "尚未安装 New API，请先执行 install"
+
+  WITH_CPA="true"
+  install_cpa
+  cmd_cred || true
+
+  echo ""
+  echo "  下一步："
+  echo "    1) ssh -L ${CPA_PORT}:127.0.0.1:${CPA_PORT} root@<服务器IP>"
+  echo "       浏览器打开 http://127.0.0.1:${CPA_PORT}/management.html"
+  echo "    2) 在 CPA 管理界面里 OAuth 登录订阅账号"
+  echo "    3) New API 渠道：类型 OpenAI，Base URL http://127.0.0.1:${CPA_PORT}/v1"
+  echo "       密钥见 ${CRED_FILE} 里的 CPA_API_KEY"
+  echo ""
+}
+
 cmd_cred() {
   require_root "$@"
   [ -x "${INSTALL_DIR}/new-api" ] || die "尚未安装"
@@ -1644,6 +1663,7 @@ dispatch() {
     logs)      cmd_logs ;;
     clean)     cmd_clean ;;
     cred)      cmd_cred ;;
+    cpa)       cmd_cpa ;;
     self-update) cmd_self_update ;;
   esac
 }
@@ -1705,6 +1725,7 @@ run_menu() {
     echo "  9) 清理旧版本备份"
     echo " 10) 重新生成凭据"
     echo " 11) 更新脚本本身"
+    echo " 12) 安装 / 修复 CPA"
     echo "  0) 退出"
     echo ""
 
@@ -1717,7 +1738,7 @@ run_menu() {
 
     case "$choice" in
       0) menu_quit ;;
-      1|2|3|4|5|6|7|8|9|10|11) ;;
+      1|2|3|4|5|6|7|8|9|10|11|12) ;;
       *) continue ;;
     esac
 
@@ -1734,6 +1755,7 @@ run_menu() {
       9) dispatch clean ;;
       10) dispatch cred ;;
       11) dispatch self-update ;;
+      12) dispatch cpa ;;
     esac
 
     printf '\n按回车返回菜单（q 退出）: ' > /dev/tty 2>/dev/null || true
