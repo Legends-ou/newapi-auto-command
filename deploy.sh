@@ -30,6 +30,8 @@ SUB_BIN="/usr/local/bin/napi"
 LOCAL_SCRIPT="${INSTALL_DIR}/deploy.sh"
 NGINX_SITE="/etc/nginx/sites-available/new-api.conf"
 SCRIPT_URL="https://raw.githubusercontent.com/Legends-ou/newapi-auto-command/main/deploy.sh"
+SCRIPT_VERSION="1.2.0"
+SCRIPT_BUILD="2026-10-21"
 APT_LOG="/tmp/newapi-deploy-apt.log"
 
 # ---- CPA（CLIProxyAPI）：只监听 127.0.0.1，不对外暴露 ----
@@ -141,6 +143,7 @@ tui_clear() {
 }
 
 usage() {
+  printf 'New API 一键部署 / 卸载脚本 v%s（%s）\n\n' "$SCRIPT_VERSION" "$SCRIPT_BUILD"
   cat <<'EOF'
 New API 一键部署 / 卸载脚本（Debian / Ubuntu）
 
@@ -186,6 +189,7 @@ New API 一键部署 / 卸载脚本（Debian / Ubuntu）
   --cpa-version <vX.Y.Z>     指定 CPA 版本
   --cpa-expose               把 CPA 管理界面暴露到公网（默认只监听本机）
   -h, --help                 显示本帮助
+  -V, --script-version       只看脚本版本
 
 说明：
   数据默认存 SQLite（/opt/new-api/data/new-api.db），不依赖 PostgreSQL / Redis。
@@ -221,6 +225,7 @@ parse_args() {
       --cpa-version=*)   CPA_VERSION_ARG="${1#*=}"; shift ;;
       --keep-data)       KEEP_DATA="true"; shift ;;
       --yes|-y)          ASSUME_YES="true"; shift ;;
+      -V|--script-version) printf 'v%s（%s）\n' "$SCRIPT_VERSION" "$SCRIPT_BUILD"; exit 0 ;;
       -h|--help)         usage; exit 0 ;;
       *) die "未知参数：$1（用 --help 查看用法）" ;;
     esac
@@ -1018,6 +1023,7 @@ print_summary() {
   echo "  管理员：首次打开网址时自行创建（脚本不生成账号）"
   echo ""
   echo "  版本：$(app_version)"
+  echo "  脚本：v${SCRIPT_VERSION}（${SCRIPT_BUILD}）"
   echo "  数据库：SQLite（${DB_PATH}）"
   echo ""
   echo "  凭据文件：${CRED_FILE}（600，仅 root）"
@@ -1381,6 +1387,7 @@ cmd_status() {
   echo ""
   echo "访问地址：${url}"
   if [ -n "$domain" ]; then echo "域名    ：${domain}"; fi
+  echo "脚本版本：v${SCRIPT_VERSION}（${SCRIPT_BUILD}）"
   echo "版本    ：$(app_version)"
   echo "端口    ：${PORT}"
   echo "数据库  ：${DB_PATH}"
@@ -1750,6 +1757,7 @@ run_menu() {
     echo "        New API 一键部署 / 卸载"
     echo "=============================================="
     echo ""
+    echo "  脚本版本：v${SCRIPT_VERSION}（${SCRIPT_BUILD}）"
     echo "  当前状态：${state}"
     echo ""
     echo "  1) 安装 / 重装（自动使用最新版）"

@@ -97,6 +97,7 @@ napi uninstall    # 卸载
 | 日志 | `napi logs` | `... -s -- logs` |
 | 清理旧备份 | `napi clean` | `... -s -- clean` |
 | 卸载 | `napi` → 5 | `... -s -- uninstall` |
+| 查看脚本版本 | `napi -V` | `bash deploy.sh -V` |
 
 `-s --` 的作用：让 bash 从标准输入读脚本，同时把它后面的内容作为脚本参数；漏掉 `--` 时命令会被当成 bash 自己的参数。
 
