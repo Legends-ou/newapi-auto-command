@@ -165,6 +165,8 @@ New API 一键部署 / 卸载脚本（Debian / Ubuntu）
   restart      重启应用
   logs         跟踪应用日志（默认最近 100 行）
   clean        删除旧版本备份 new-api.bak
+  cred         重新生成凭据文件（不重装）
+  self-update  只更新脚本本身（不重装、不升级应用）
 
 选项：
   --port <端口>              New API 监听端口（默认 3000）
@@ -192,7 +194,7 @@ EOF
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
-      install|upgrade|status|uninstall|domain|show|restart|logs|clean) ACTION="$1"; shift ;;
+      install|upgrade|status|uninstall|domain|show|restart|logs|clean|cred|self-update) ACTION="$1"; shift ;;
       --port)            PORT="${2:-}"; PORT_SET="true"; shift 2 ;;
       --port=*)          PORT="${1#*=}"; PORT_SET="true"; shift ;;
       --domain)          DOMAIN="${2:-}"; shift 2 ;;
@@ -221,7 +223,7 @@ parse_args() {
   done
 
   case "$ACTION" in
-    install|upgrade|status|uninstall|domain|show|restart|logs|clean) ;;
+    install|upgrade|status|uninstall|domain|show|restart|logs|clean|cred|self-update) ;;
     *) die "未知命令：$ACTION" ;;
   esac
 
@@ -1251,15 +1253,45 @@ open_firewall() {
 }
 
 save_self() {
+  # 优先从发布地址取最新版（这样 upgrade 会顺带更新脚本本身）；
+  # 网络不可用时退回复制当前文件。
+  local tmp
+  tmp="$(mktemp)"
+  if curl -fsSL --connect-timeout 10 --max-time 60 "$SCRIPT_URL" -o "$tmp" 2>/dev/null \
+    && bash -n "$tmp" 2>/dev/null; then
+    install -m 0755 "$tmp" "$LOCAL_SCRIPT"
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+
   if [ -f "${BASH_SOURCE[0]:-}" ]; then
     if cp -f "${BASH_SOURCE[0]}" "$LOCAL_SCRIPT" 2>/dev/null; then
-      chmod 0755 "$LOCAL_SCRIPT"; return 0
+      chmod 0755 "$LOCAL_SCRIPT"
+      log_warn "无法访问发布地址，已复制当前脚本（可能是旧版）"
+      return 0
     fi
   fi
-  if curl -fsSL --connect-timeout 10 --max-time 60 "$SCRIPT_URL" -o "$LOCAL_SCRIPT" 2>/dev/null; then
-    chmod 0755 "$LOCAL_SCRIPT"; return 0
-  fi
   return 1
+}
+
+cmd_self_update() {
+  require_root "$@"
+  local tmp
+  tmp="$(mktemp)"
+  log_info "下载最新脚本..."
+  if ! curl -fsSL --connect-timeout 10 --max-time 60 "$SCRIPT_URL" -o "$tmp"; then
+    rm -f "$tmp"
+    die "下载失败，请检查网络后重试"
+  fi
+  if ! bash -n "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    die "下载的脚本语法校验失败，已中止（现有脚本未改动）"
+  fi
+  install -m 0755 "$tmp" "$LOCAL_SCRIPT"
+  rm -f "$tmp"
+  log_ok "脚本已更新：${LOCAL_SCRIPT}"
+  log_info "重新运行 napi 即可使用新版本"
 }
 
 install_launcher() {
@@ -1413,6 +1445,36 @@ cmd_domain() {
   else
     log_warn "HTTPS 未成功，应用已回退到 IP:${PORT} 访问"
   fi
+}
+
+cmd_cred() {
+  require_root "$@"
+  [ -x "${INSTALL_DIR}/new-api" ] || die "尚未安装"
+
+  load_state
+  PORT="$(env_get PORT)"; [ -n "$PORT" ] || PORT="${ST_SERVER_PORT:-3000}"
+  DB_PATH="${ST_DB_PATH:-${DATA_DIR}/new-api.db}"
+  SESSION_SECRET="$(env_get SESSION_SECRET)"
+  CRYPTO_SECRET="$(env_get CRYPTO_SECRET)"
+
+  CPA_API_KEY="$(cpa_env_get CPA_API_KEY)"
+  CPA_MANAGE_KEY="$(cpa_env_get CPA_MANAGE_KEY)"
+  if [ -n "$CPA_API_KEY" ]; then
+    WITH_CPA="true"
+  else
+    WITH_CPA="false"
+  fi
+
+  local url
+  url="$(access_url)"
+  write_credentials "$url"
+  log_ok "已重新生成 ${CRED_FILE}"
+  echo ""
+  echo "访问地址：${url}"
+  if [ -n "$CPA_API_KEY" ]; then
+    echo "CPA 渠道地址：http://127.0.0.1:${CPA_PORT}/v1"
+  fi
+  echo ""
 }
 
 cmd_show() {
@@ -1581,6 +1643,8 @@ dispatch() {
     restart)   cmd_restart ;;
     logs)      cmd_logs ;;
     clean)     cmd_clean ;;
+    cred)      cmd_cred ;;
+    self-update) cmd_self_update ;;
   esac
 }
 
@@ -1639,6 +1703,8 @@ run_menu() {
     echo "  7) 重启应用"
     echo "  8) 查看日志"
     echo "  9) 清理旧版本备份"
+    echo " 10) 重新生成凭据"
+    echo " 11) 更新脚本本身"
     echo "  0) 退出"
     echo ""
 
@@ -1651,7 +1717,7 @@ run_menu() {
 
     case "$choice" in
       0) menu_quit ;;
-      1|2|3|4|5|6|7|8|9) ;;
+      1|2|3|4|5|6|7|8|9|10|11) ;;
       *) continue ;;
     esac
 
@@ -1666,6 +1732,8 @@ run_menu() {
       7) dispatch restart ;;
       8) dispatch logs ;;
       9) dispatch clean ;;
+      10) dispatch cred ;;
+      11) dispatch self-update ;;
     esac
 
     printf '\n按回车返回菜单（q 退出）: ' > /dev/tty 2>/dev/null || true
