@@ -32,6 +32,19 @@ NGINX_SITE="/etc/nginx/sites-available/new-api.conf"
 SCRIPT_URL="https://raw.githubusercontent.com/Legends-ou/newapi-auto-command/main/deploy.sh"
 APT_LOG="/tmp/newapi-deploy-apt.log"
 
+# ---- CPA（CLIProxyAPI）：只监听 127.0.0.1，不对外暴露 ----
+CPA_REPO="router-for-me/CLIProxyAPI"
+CPA_SERVICE="cpa"
+CPA_USER="cpa"
+CPA_DIR="/opt/cpa"
+CPA_AUTH_DIR="${CPA_DIR}/auth"
+CPA_CONF_DIR="/etc/cpa"
+CPA_CONF="${CPA_CONF_DIR}/config.yaml"
+CPA_UNIT_FILE="/etc/systemd/system/cpa.service"
+CPA_PORT="8317"
+CPA_BIN="${CPA_DIR}/cli-proxy-api"
+CPA_VERSION=""
+
 ACTION="install"
 PORT="3000"
 PORT_SET="false"
@@ -45,6 +58,10 @@ KEEP_DATA="false"
 LOG_LINES="100"
 VERBOSE="false"
 FROM_MENU="false"
+WITH_CPA="true"
+CPA_VERSION_ARG=""
+CPA_MANAGE_KEY=""
+CPA_API_KEY=""
 DB_PATH=""
 HTTPS_OK="false"
 
@@ -160,6 +177,9 @@ New API 一键部署 / 卸载脚本（Debian / Ubuntu）
   --verbose                  显示 apt / certbot / 下载的完整输出
   --yes                      卸载时跳过确认
   --keep-data                卸载时先备份 SQLite 数据库
+  --no-cpa                   不安装 CPA（只装 New API）
+  --cpa-port <端口>          CPA 监听端口（默认 8317，只绑 127.0.0.1）
+  --cpa-version <vX.Y.Z>     指定 CPA 版本
   -h, --help                 显示本帮助
 
 说明：
@@ -188,6 +208,11 @@ parse_args() {
       --lines)           LOG_LINES="${2:-}"; shift 2 ;;
       --lines=*)         LOG_LINES="${1#*=}"; shift ;;
       --verbose)         VERBOSE="true"; shift ;;
+      --no-cpa)          WITH_CPA="false"; shift ;;
+      --cpa-port)        CPA_PORT="${2:-}"; shift 2 ;;
+      --cpa-port=*)      CPA_PORT="${1#*=}"; shift ;;
+      --cpa-version)     CPA_VERSION_ARG="${2:-}"; shift 2 ;;
+      --cpa-version=*)   CPA_VERSION_ARG="${1#*=}"; shift ;;
       --keep-data)       KEEP_DATA="true"; shift ;;
       --yes|-y)          ASSUME_YES="true"; shift ;;
       -h|--help)         usage; exit 0 ;;
@@ -204,6 +229,7 @@ parse_args() {
   case "$PORT" in ''|*[!0-9]*) die "--port 必须是数字" ;; esac
   [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "--port 超出 1-65535"
   case "$LOG_LINES" in ''|*[!0-9]*) die "--lines 必须是数字" ;; esac
+  case "$CPA_PORT" in ''|*[!0-9]*) die "--cpa-port 必须是数字" ;; esac
 
   if [ -n "$DOMAIN" ]; then
     [ -n "$TLS_EMAIL" ] || die "使用 --domain 时必须同时给出 --email（证书通知邮箱）"
@@ -716,6 +742,184 @@ setup_nginx() {
   HTTPS_OK="true"
 }
 
+# ---------------------------------------------------------------- CPA（可选，仅本机）
+
+cpa_env_get() {
+  [ -f "${CPA_CONF_DIR}/cpa.env" ] || return 0
+  sed -n "s/^$1=//p" "${CPA_CONF_DIR}/cpa.env" | sed -n '1p'
+}
+
+resolve_cpa_version() {
+  local tag=""
+  if [ -n "${CPA_VERSION_ARG:-}" ]; then
+    tag="$CPA_VERSION_ARG"
+    case "$tag" in v*) ;; *) tag="v${tag}" ;; esac
+  else
+    log_info "查询 CPA 最新版本..."
+    local raw=""
+    raw="$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 40 \
+      "https://api.github.com/repos/${CPA_REPO}/releases/latest" 2>/dev/null || true)"
+    tag="$(printf '%s' "$raw" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')"
+    [ -n "$tag" ] || die "获取 CPA 版本失败，可加 --cpa-version v8.x.y 指定"
+  fi
+  case "$tag" in v[0-9]*) ;; *) die "CPA 版本号格式异常：${tag}" ;; esac
+  CPA_VERSION="$tag"
+  log_info "CPA 目标版本：${CPA_VERSION}"
+}
+
+download_cpa() {
+  local ver="${CPA_VERSION#v}"
+  local asset="CLIProxyAPI_${ver}_linux_${ARCH}.tar.gz"
+  local base="https://github.com/${CPA_REPO}/releases/download/${CPA_VERSION}"
+  local url="${base}/${asset}"
+  local tmp
+  tmp="$(mktemp -d)"
+
+  [ -n "$GH_PROXY" ] && url="${GH_PROXY}/${url}"
+
+  log_info "下载 ${asset}（约 24MB）..."
+  if ! curl -fsSL --retry 3 --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+      -o "${tmp}/${asset}" "$url"; then
+    rm -rf "$tmp"
+    die "下载 CPA 失败：${url}"
+  fi
+
+  if curl -fsSL --retry 2 --max-time 40 -o "${tmp}/checksums.txt" \
+      "${GH_PROXY:+${GH_PROXY}/}${base}/checksums.txt" 2>/dev/null; then
+    local expected actual
+    expected="$(awk -v f="$asset" '$2 == f || $2 == "*"f { print $1; exit }' "${tmp}/checksums.txt")"
+    actual="$(sha256sum "${tmp}/${asset}" | awk '{ print $1 }')"
+    if [ -n "$expected" ] && [ "$expected" != "$actual" ]; then
+      rm -rf "$tmp"
+      die "CPA SHA-256 校验失败"
+    fi
+  fi
+
+  tar -xzf "${tmp}/${asset}" -C "$tmp"
+  local found=""
+  found="$(find "$tmp" -maxdepth 3 -type f -name 'cli-proxy-api*' -perm -u+x | sed -n '1p')"
+  if [ -z "$found" ]; then
+    found="$(find "$tmp" -maxdepth 3 -type f -perm -u+x -size +1M | sed -n '1p')"
+  fi
+  [ -n "$found" ] || { rm -rf "$tmp"; die "CPA 压缩包里没找到可执行文件"; }
+
+  install -m 0755 "$found" "$CPA_BIN"
+  rm -rf "$tmp"
+  log_ok "CPA 已安装到 ${CPA_BIN}"
+}
+
+write_cpa_conf() {
+  umask 077
+  {
+    printf '# CPA 配置（由 deploy.sh 生成）\n'
+    printf '# 只监听本机：公网无法访问，管理界面走 SSH 隧道\n'
+    printf 'host: "127.0.0.1"\n'
+    printf 'port: %s\n' "$CPA_PORT"
+    printf 'auth-dir: "%s"\n' "$CPA_AUTH_DIR"
+    printf '\n'
+    printf 'remote-management:\n'
+    printf '  allow-remote: false\n'
+    printf '  secret-key: "%s"\n' "$CPA_MANAGE_KEY"
+    printf '\n'
+    printf 'api-keys:\n'
+    printf '  - "%s"\n' "$CPA_API_KEY"
+    umask 022
+  } > "$CPA_CONF"
+  chmod 0640 "$CPA_CONF"
+  chown "root:${CPA_USER}" "$CPA_CONF"
+
+  umask 077
+  {
+    printf 'CPA_MANAGE_KEY=%s\n' "$CPA_MANAGE_KEY"
+    printf 'CPA_API_KEY=%s\n' "$CPA_API_KEY"
+  } > "${CPA_CONF_DIR}/cpa.env"
+  chmod 0600 "${CPA_CONF_DIR}/cpa.env"
+  umask 022
+}
+
+write_cpa_unit() {
+  cat > "$CPA_UNIT_FILE" <<EOF
+[Unit]
+Description=CLIProxyAPI (CPA) - local only
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${CPA_USER}
+Group=${CPA_USER}
+WorkingDirectory=${CPA_DIR}
+ExecStart=${CPA_BIN} --config ${CPA_CONF}
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=${CPA_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 0644 "$CPA_UNIT_FILE"
+}
+
+cpa_health() {
+  curl -fsS --max-time 5 -H "Authorization: Bearer ${CPA_API_KEY}" \
+    "http://127.0.0.1:${CPA_PORT}/v1/models" >/dev/null 2>&1
+}
+
+install_cpa() {
+  step "安装 CPA（仅监听 127.0.0.1:${CPA_PORT}）"
+
+  if ! id -u "$CPA_USER" >/dev/null 2>&1; then
+    useradd -r -s /bin/sh -d "$CPA_DIR" "$CPA_USER"
+    log_ok "已创建系统用户 ${CPA_USER}"
+  fi
+  install -d -m 0755 "$CPA_DIR"
+  install -d -m 0700 "$CPA_AUTH_DIR"
+  install -d -m 0750 "$CPA_CONF_DIR"
+  chown -R "${CPA_USER}:${CPA_USER}" "$CPA_DIR"
+  chown "root:${CPA_USER}" "$CPA_CONF_DIR"
+  chmod 0750 "$CPA_CONF_DIR"
+
+  CPA_MANAGE_KEY="$(cpa_env_get CPA_MANAGE_KEY)"
+  CPA_API_KEY="$(cpa_env_get CPA_API_KEY)"
+  CPA_MANAGE_KEY="${CPA_MANAGE_KEY:-$(rand_hex 32)}"
+  CPA_API_KEY="${CPA_API_KEY:-sk-$(rand_hex 24)}"
+
+  resolve_cpa_version
+  if [ -x "$CPA_BIN" ]; then
+    log_info "CPA 二进制已存在，跳过下载"
+  else
+    download_cpa
+  fi
+  chown "${CPA_USER}:${CPA_USER}" "$CPA_BIN"
+
+  write_cpa_conf
+  write_cpa_unit
+
+  systemctl daemon-reload
+  systemctl enable "$CPA_SERVICE" >/dev/null 2>&1 || true
+  systemctl restart "$CPA_SERVICE"
+
+  local i
+  for i in $(seq 1 30); do
+    if cpa_health; then
+      log_ok "CPA 已就绪（127.0.0.1:${CPA_PORT}，仅本机）"
+      return 0
+    fi
+    if ! systemctl is-active --quiet "$CPA_SERVICE"; then
+      journalctl -u "$CPA_SERVICE" -n 40 --no-pager || true
+      die "CPA 启动失败"
+    fi
+    sleep 2
+  done
+  journalctl -u "$CPA_SERVICE" -n 40 --no-pager || true
+  die "CPA 未就绪（检查 ${CPA_CONF}）"
+}
+
 # ---------------------------------------------------------------- 摘要
 
 get_public_ip() {
@@ -759,6 +963,14 @@ write_credentials() {
     printf 'ENV_FILE=%s\n' "$ENV_FILE"
     printf 'SESSION_SECRET=%s\n' "$SESSION_SECRET"
     printf 'CRYPTO_SECRET=%s\n' "$CRYPTO_SECRET"
+    if [ "$WITH_CPA" = "true" ] && [ -n "$CPA_API_KEY" ]; then
+      printf '\n# CPA（只监听 127.0.0.1，不对外）\n'
+      printf 'CPA_API_URL=%s\n' "http://127.0.0.1:${CPA_PORT}/v1"
+      printf 'CPA_API_KEY=%s\n' "$CPA_API_KEY"
+      printf 'CPA_MANAGE_KEY=%s\n' "$CPA_MANAGE_KEY"
+      printf 'CPA管理界面: ssh -L %s:127.0.0.1:%s root@<服务器IP> 后打开 http://127.0.0.1:%s/management.html\n' \
+        "$CPA_PORT" "$CPA_PORT" "$CPA_PORT"
+    fi
     umask 022
   } > "$CRED_FILE"
   chmod 0600 "$CRED_FILE"
@@ -781,6 +993,15 @@ print_summary() {
   echo "  凭据文件：${CRED_FILE}（600，仅 root）"
   echo "  应用配置：${ENV_FILE}"
   echo "  安装状态：${STATE_FILE}（卸载依赖它）"
+  if [ "$WITH_CPA" = "true" ] && [ -n "$CPA_API_KEY" ]; then
+    echo ""
+    echo "  CPA（只监听 127.0.0.1:${CPA_PORT}，公网访问不到）："
+    echo "    New API 渠道地址：http://127.0.0.1:${CPA_PORT}/v1"
+    echo "    New API 渠道密钥：${CPA_API_KEY}"
+    echo "    CPA 管理密钥    ：${CPA_MANAGE_KEY}"
+    echo "    管理界面        ：先 ssh -L ${CPA_PORT}:127.0.0.1:${CPA_PORT} root@<服务器IP>"
+    echo "                      再打开 http://127.0.0.1:${CPA_PORT}/management.html"
+  fi
   echo ""
   echo "  常用命令："
   echo "    napi                    再次打开本菜单"
@@ -834,14 +1055,14 @@ verify_clean() {
   step "残留自检"
   local issues=0 f u
 
-  for f in "$INSTALL_DIR" "$CONF_DIR" "$SUB_BIN" "$APT_LOG"; do
+  for f in "$INSTALL_DIR" "$CONF_DIR" "$SUB_BIN" "$APT_LOG" "$CPA_DIR" "$CPA_CONF_DIR"; do
     if [ -e "$f" ]; then
       log_warn "残留：$f"
       issues=$((issues + 1))
     fi
   done
 
-  for u in newapi.service; do
+  for u in newapi.service cpa.service; do
     if systemctl list-unit-files 2>/dev/null | awk -v u="$u" '$1 == u { found = 1 } END { exit !found }'; then
       log_warn "残留服务单元：$u"
       issues=$((issues + 1))
@@ -850,6 +1071,10 @@ verify_clean() {
 
   if id -u "$SERVICE_USER" >/dev/null 2>&1; then
     log_warn "残留系统用户：$SERVICE_USER"
+    issues=$((issues + 1))
+  fi
+  if id -u "$CPA_USER" >/dev/null 2>&1; then
+    log_warn "残留系统用户：$CPA_USER"
     issues=$((issues + 1))
   fi
 
@@ -951,6 +1176,10 @@ cmd_install() {
   log_ok "配置已写入 ${ENV_FILE}"
 
   start_service
+
+  if [ "$WITH_CPA" = "true" ]; then
+    install_cpa
+  fi
 
   open_firewall
 
@@ -1112,6 +1341,15 @@ cmd_status() {
     *'"status":true'*) echo "管理后台  ：首次访问需创建管理员" ;;
     *) echo "管理后台  ：已初始化" ;;
   esac
+
+  if [ -x "$CPA_BIN" ] && [ -f "$CPA_CONF" ]; then
+    CPA_API_KEY="$(cpa_env_get CPA_API_KEY)"
+    if systemctl is-active "$CPA_SERVICE" >/dev/null 2>&1 && cpa_health; then
+      echo "CPA       ：运行中（127.0.0.1:${CPA_PORT}，仅本机）"
+    else
+      echo "CPA       ：未运行或不可用"
+    fi
+  fi
   echo ""
 
   if [ -n "$domain" ]; then
@@ -1288,6 +1526,17 @@ cmd_uninstall() {
       certbot delete --cert-name "$domain" --non-interactive >/dev/null 2>&1 \
         || log_warn "证书删除失败，可手动：certbot delete --cert-name ${domain}"
     fi
+  fi
+
+  if [ -f "$CPA_UNIT_FILE" ] || [ -d "$CPA_DIR" ]; then
+    step "移除 CPA"
+    systemctl stop "$CPA_SERVICE" 2>/dev/null || true
+    systemctl disable "$CPA_SERVICE" 2>/dev/null || true
+    rm -f "$CPA_UNIT_FILE"
+    systemctl daemon-reload
+    rm -rf "$CPA_DIR" "$CPA_CONF_DIR"
+    userdel "$CPA_USER" 2>/dev/null || true
+    log_info "已移除 CPA（含账号凭据与配置）"
   fi
 
   step "移除用户与目录"

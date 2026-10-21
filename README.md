@@ -3,6 +3,7 @@
 一条命令把 [New API](https://github.com/QuantumNous/new-api) 装好，另一条命令把它删干净。
 
 - **单二进制 + SQLite**：不依赖 PostgreSQL / Redis，装完即可用；
+- **可选 CPA**：把订阅账号（Claude / Gemini / Codex 等）转成兼容 API，**只监听 `127.0.0.1:8317`，公网访问不到**；不想要加 `--no-cpa`；
 - **管理员自己建**：装完打开网址，用 New API 的初始化页面创建（脚本不生成、也不保存你的密码）；
 - **装完生成 `napi` 命令**：以后输入 `napi` 打开菜单，不用再贴 curl；
 - **一键卸载**：服务、二进制、SQLite 数据、快捷命令、Nginx 站点、证书、临时文件、按需卸载的软件包，最后做残留自检；
@@ -115,6 +116,9 @@ napi uninstall    # 卸载
 | `--verbose` | 显示 apt / certbot / 下载的完整输出 | 关闭 |
 | `--yes` / `-y` | 卸载时跳过确认 | 关闭 |
 | `--keep-data` | 卸载前备份 SQLite 数据库 | 关闭 |
+| `--no-cpa` | 不安装 CPA，只装 New API | 安装 CPA |
+| `--cpa-port <端口>` | CPA 监听端口（只绑 127.0.0.1） | `8317` |
+| `--cpa-version <vX.Y.Z>` | 指定 CPA 版本 | 最新 Release |
 
 ---
 
@@ -134,6 +138,33 @@ napi uninstall    # 卸载
 
 ---
 
+## CPA（把订阅转成 API）
+
+安装默认会一并装 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)，**只监听 `127.0.0.1:8317`，公网访问不到**。不想要就加 `--no-cpa`。
+
+### 访问 CPA 管理界面（仅管理员）
+
+```bash
+ssh -L 8317:127.0.0.1:8317 root@你的服务器IP
+# 保持这个窗口，浏览器打开 http://127.0.0.1:8317/management.html
+# 管理密钥见 /etc/new-api/credentials.txt 里的 CPA_MANAGE_KEY
+```
+
+### 在 CPA 里登录订阅账号
+
+管理界面 → 选择提供商（Claude / Codex / Gemini / Antigravity）→ 走 OAuth 登录。**这一步必须在浏览器完成**，脚本替不了。
+
+### 在 New API 里接 CPA
+
+渠道 → 新建：
+
+- 类型：OpenAI（兼容）
+- Base URL：`http://127.0.0.1:8317/v1`
+- 密钥：`credentials.txt` 里的 `CPA_API_KEY`
+
+保存后点「测试」，通过即可给令牌使用。
+
+> CPA 的数据与配置在 `/opt/cpa`（含 `auth/` 账号凭据）和 `/etc/cpa`，权限 600/640；卸载时一并删除。
 ## 升级与回滚
 
 ```bash
@@ -227,4 +258,5 @@ sudo bash /opt/new-api/deploy.sh install --port 3001
 
 - `bash -n` 通过；`--help`、非法端口、非 root 分支本机实测；
 - `POST /api/setup` 的字段、`/api/status` 的健康检查端点、Release 资产命名（`new-api-vX.Y.Z` / `new-api-arm64-vX.Y.Z`）均按当前源码核对；
+- **CPA 部分未真机验证**（下载、启动、`/v1/models` 鉴权、SSH 隧道访问均未实测）；
 - **本版脚本尚未在真实 Linux 上跑通一次完整安装**（上一版 Sub2API 脚本的真机经验已复用，但 New API 的下载、建库、setup 三段仍需真机确认）。
