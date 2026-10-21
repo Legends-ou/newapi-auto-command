@@ -30,7 +30,7 @@ SUB_BIN="/usr/local/bin/napi"
 LOCAL_SCRIPT="${INSTALL_DIR}/deploy.sh"
 NGINX_SITE="/etc/nginx/sites-available/new-api.conf"
 SCRIPT_URL="https://raw.githubusercontent.com/Legends-ou/newapi-auto-command/main/deploy.sh"
-SCRIPT_VERSION="1.5.2"
+SCRIPT_VERSION="1.5.3"
 SCRIPT_BUILD="2026-10-21"
 APT_LOG="/tmp/newapi-deploy-apt.log"
 
@@ -62,6 +62,7 @@ LOG_LINES="100"
 VERBOSE="false"
 FROM_MENU="false"
 WITH_CPA="false"
+SKIP_MENU_PAUSE="false"
 CPA_VERSION_ARG=""
 CPA_MANAGE_KEY=""
 CPA_API_KEY=""
@@ -923,6 +924,9 @@ remove_cpa() {
   fi
   ST_UFW_PORTS="$(printf '%s' "${ST_UFW_PORTS:-}" | tr ',' '\n' | grep -vx "${CPA_PORT}/tcp" | paste -sd ',' - || true)"
   save_state
+
+  # 重新生成凭据，去掉已删除的 CPA 段
+  cmd_cred >/dev/null 2>&1 || true
 
   log_ok "CPA 已卸载（服务、二进制、账号凭据、配置已删除；New API 不受影响）"
 }
@@ -1827,6 +1831,15 @@ cpa_config_host() {
 
 cmd_cpa_info() {
   local host pub k1 k2
+
+  if [ ! -x "$CPA_BIN" ]; then
+    echo ""
+    echo "  CPA 未安装。"
+    echo "  请先选 4「安装 / 修复」，装好后这里才会显示状态与密钥。"
+    echo ""
+    return 0
+  fi
+
   host="$(cpa_config_host)"
   pub="$(get_public_ip || true)"
   [ -n "$pub" ] || pub="<服务器IP>"
@@ -1838,7 +1851,7 @@ cmd_cpa_info() {
   else
     echo "  服务  ：未运行"
   fi
-  echo "  监听  ：${host:-?}:${CPA_PORT}"
+  echo "  监听  ：${host:-127.0.0.1}:${CPA_PORT}"
   if [ "$host" = "0.0.0.0" ]; then
     echo "  管理页：http://${pub}:${CPA_PORT}/management.html"
   else
@@ -1874,10 +1887,14 @@ run_cpa_menu() {
     else
       echo "  服务：未安装"
     fi
-    if [ "$host" = "0.0.0.0" ]; then
-      echo "  模式：公网可访问 → http://${pub}:${CPA_PORT}/management.html"
+    if [ -x "$CPA_BIN" ]; then
+      if [ "$host" = "0.0.0.0" ]; then
+        echo "  模式：公网可访问 → http://${pub}:${CPA_PORT}/management.html"
+      else
+        echo "  模式：仅本机（SSH 隧道）"
+      fi
     else
-      echo "  模式：仅本机（SSH 隧道）"
+      echo "  模式：—"
     fi
     echo ""
     echo "  1) 开放公网（临时）"
@@ -1894,10 +1911,19 @@ run_cpa_menu() {
     fi
 
     case "$sub" in
-      0) return 0 ;;
-      1) CPA_EXPOSE="true";  dispatch cpa ;;
-      2) CPA_EXPOSE="false"; dispatch cpa ;;
-      3) cmd_cpa_info ;;
+      0) SKIP_MENU_PAUSE="true"; return 0 ;;
+      1|2|3)
+        if [ ! -x "$CPA_BIN" ]; then
+          echo ""
+          echo "  CPA 还没有安装，请先选 4 安装。"
+        else
+          case "$sub" in
+            1) CPA_EXPOSE="true";  dispatch cpa ;;
+            2) CPA_EXPOSE="false"; dispatch cpa ;;
+            3) cmd_cpa_info ;;
+          esac
+        fi
+        ;;
       4)
         if [ "$host" = "0.0.0.0" ]; then CPA_EXPOSE="true"; else CPA_EXPOSE="false"; fi
         dispatch cpa
@@ -1984,6 +2010,12 @@ run_menu() {
       11) run_cpa_menu ;;
       12) dispatch uninstall ;;
     esac
+
+    # 从 CPA 子菜单选 0 返回：直接重绘主菜单，不再要求按回车
+    if [ "$SKIP_MENU_PAUSE" = "true" ]; then
+      SKIP_MENU_PAUSE="false"
+      continue
+    fi
 
     printf '\n按回车返回菜单，输入 q 直接退出: ' > /dev/tty 2>/dev/null || true
     menu_read again || menu_unreadable
