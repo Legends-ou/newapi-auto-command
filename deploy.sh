@@ -30,7 +30,7 @@ SUB_BIN="/usr/local/bin/napi"
 LOCAL_SCRIPT="${INSTALL_DIR}/deploy.sh"
 NGINX_SITE="/etc/nginx/sites-available/new-api.conf"
 SCRIPT_URL="https://raw.githubusercontent.com/Legends-ou/newapi-auto-command/main/deploy.sh"
-SCRIPT_VERSION="1.4.1"
+SCRIPT_VERSION="1.5.0"
 SCRIPT_BUILD="2026-10-21"
 APT_LOG="/tmp/newapi-deploy-apt.log"
 
@@ -61,7 +61,7 @@ KEEP_DATA="false"
 LOG_LINES="100"
 VERBOSE="false"
 FROM_MENU="false"
-WITH_CPA="true"
+WITH_CPA="false"
 CPA_VERSION_ARG=""
 CPA_MANAGE_KEY=""
 CPA_API_KEY=""
@@ -185,7 +185,8 @@ usage() {
     --timezone <时区>        默认 Asia/Shanghai
 
   [CPA]
-    --no-cpa                 不安装 CPA（只装 New API）
+    --with-cpa               安装时一并装 CPA（默认不装）
+    --cpa-remove             卸载 CPA（保留 New API）
     --cpa-port <端口>        CPA 端口（默认 8317）
     --cpa-version <vX.Y.Z>   指定 CPA 版本
     --cpa-expose             临时开放 CPA 管理界面到公网
@@ -227,7 +228,9 @@ parse_args() {
       --lines)           LOG_LINES="${2:-}"; shift 2 ;;
       --lines=*)         LOG_LINES="${1#*=}"; shift ;;
       --verbose)         VERBOSE="true"; shift ;;
+      --with-cpa)        WITH_CPA="true"; shift ;;
       --no-cpa)          WITH_CPA="false"; shift ;;
+      --cpa-remove)      CPA_REMOVE="true"; shift ;;
       --cpa-port)        CPA_PORT="${2:-}"; shift 2 ;;
       --cpa-port=*)      CPA_PORT="${1#*=}"; shift ;;
       --cpa-expose)      CPA_EXPOSE="true"; shift ;;
@@ -900,6 +903,30 @@ cpa_health() {
     "http://127.0.0.1:${CPA_PORT}/v1/models" >/dev/null 2>&1
 }
 
+remove_cpa() {
+  if [ ! -f "$CPA_UNIT_FILE" ] && [ ! -d "$CPA_DIR" ] && [ ! -d "$CPA_CONF_DIR" ]; then
+    log_info "CPA 未安装，无需卸载"
+    return 0
+  fi
+
+  step "移除 CPA"
+  systemctl stop "$CPA_SERVICE" 2>/dev/null || true
+  systemctl disable "$CPA_SERVICE" 2>/dev/null || true
+  rm -f "$CPA_UNIT_FILE"
+  systemctl daemon-reload
+
+  rm -rf "$CPA_DIR" "$CPA_CONF_DIR"
+  userdel "$CPA_USER" 2>/dev/null || true
+
+  if command -v ufw >/dev/null 2>&1; then
+    ufw delete allow "${CPA_PORT}/tcp" >/dev/null 2>&1 || true
+  fi
+  ST_UFW_PORTS="$(printf '%s' "${ST_UFW_PORTS:-}" | tr ',' '\n' | grep -vx "${CPA_PORT}/tcp" | paste -sd ',' - || true)"
+  save_state
+
+  log_ok "CPA 已卸载（服务、二进制、账号凭据、配置已删除；New API 不受影响）"
+}
+
 install_cpa() {
   if [ "${CPA_EXPOSE:-false}" = "true" ]; then
     step "安装 CPA（对外暴露，端口 ${CPA_PORT}）"
@@ -1517,10 +1544,15 @@ cmd_domain() {
 
 cmd_cpa() {
   require_root "$@"
-  [ -x "${INSTALL_DIR}/new-api" ] || die "尚未安装 New API，请先执行 install"
-
-  # 关键：必须先探测系统架构，否则下载地址里的 arch 为空
   detect_os
+  load_state
+
+  if [ "$CPA_REMOVE" = "true" ]; then
+    remove_cpa
+    return 0
+  fi
+
+  [ -x "${INSTALL_DIR}/new-api" ] || die "尚未安装 New API，请先执行 install"
 
   WITH_CPA="true"
   install_cpa
@@ -1839,6 +1871,7 @@ run_cpa_menu() {
     echo "  2) 收回（仅本机）"
     echo "  3) 查看状态与密钥"
     echo "  4) 安装 / 修复"
+    echo "  5) 卸载 CPA"
     echo "  0) 返回主菜单"
     echo ""
 
@@ -1855,6 +1888,11 @@ run_cpa_menu() {
       4)
         if [ "$host" = "0.0.0.0" ]; then CPA_EXPOSE="true"; else CPA_EXPOSE="false"; fi
         dispatch cpa
+        ;;
+      5)
+        CPA_REMOVE="true"
+        dispatch cpa
+        CPA_REMOVE="false"
         ;;
       *) continue ;;
     esac
@@ -1899,7 +1937,7 @@ run_menu() {
     echo "  8) 重新生成凭据"
     echo "  9) 更新脚本本身"
     echo " 10) 清理旧版本备份"
-    echo " 11) CPA 管理（开放 / 收回 / 状态）"
+    echo " 11) CPA 管理（安装 / 开放 / 收回）"
     echo ""
     echo " 12) 卸载"
     echo "  0) 退出"

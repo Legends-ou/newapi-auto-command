@@ -3,7 +3,7 @@
 一条命令把 [New API](https://github.com/QuantumNous/new-api) 装好，另一条命令把它删干净。
 
 - **单二进制 + SQLite**：不依赖 PostgreSQL / Redis，装完即可用；
-- **可选 CPA**：把订阅账号（Claude / Gemini / Codex 等）转成兼容 API，**只监听 `127.0.0.1:8317`，公网访问不到**；不想要加 `--no-cpa`；
+- **CPA 可选、默认不装**：需要把 Claude / Gemini 等订阅账号转成 API 时，在菜单「CPA 管理」里装（或 `--with-cpa`）；默认只监听 `127.0.0.1:8317`；
 - **管理员自己建**：装完打开网址，用 New API 的初始化页面创建（脚本不生成、也不保存你的密码）；
 - **装完生成 `napi` 命令**：以后输入 `napi` 打开菜单，不用再贴 curl；
 - **一键卸载**：服务、二进制、SQLite 数据、快捷命令、Nginx 站点、证书、临时文件、按需卸载的软件包，最后做残留自检；
@@ -125,7 +125,8 @@ napi uninstall    # 卸载
 | `--verbose` | 显示 apt / certbot / 下载的完整输出 | 关闭 |
 | `--yes` / `-y` | 卸载时跳过确认 | 关闭 |
 | `--keep-data` | 卸载前备份 SQLite 数据库 | 关闭 |
-| `--no-cpa` | 不安装 CPA，只装 New API | 安装 CPA |
+| `--with-cpa` | 安装时一并装 CPA | 不安装 |
+| `--cpa-remove` | 卸载 CPA（保留 New API） | — |
 | `--cpa-port <端口>` | CPA 监听端口（只绑 127.0.0.1） | `8317` |
 | `--cpa-version <vX.Y.Z>` | 指定 CPA 版本 | 最新 Release |
 
@@ -149,7 +150,7 @@ napi uninstall    # 卸载
 
 ## CPA（把订阅转成 API）
 
-安装默认会一并装 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)，**只监听 `127.0.0.1:8317`，公网访问不到**。不想要就加 `--no-cpa`。
+**默认不安装 CPA。** 需要时从主菜单选 **11** 进入安装，或 `sudo napi cpa`；装好后只监听 `127.0.0.1:8317`，公网访问不到。
 
 ### 在菜单里管理 CPA
 
@@ -160,6 +161,7 @@ napi uninstall    # 卸载
   2) 收回（仅本机）
   3) 查看状态与密钥
   4) 安装 / 修复
+  5) 卸载 CPA
   0) 返回主菜单
 ```
 
