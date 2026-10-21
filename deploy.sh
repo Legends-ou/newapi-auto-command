@@ -1374,7 +1374,7 @@ setup_nginx() {
 
       # 证书失败最常见的两个原因：DNS 没指向本机、80 端口不通。先查解析。
       local dns_ips="" pub=""
-      dns_ips="$(getent ahosts "$DOMAIN" 2>/dev/null | awk '{ print $1 }' | sort -u | tr '\n' ' ')"
+      dns_ips="$(getent ahosts "$DOMAIN" 2>/dev/null | awk '{ print $1 }' | sort -u | tr '\n' ' ' || true)"
       pub="$(get_public_ip || true)"
       if [ -n "$dns_ips" ] && [ -n "$pub" ]; then
         case " ${dns_ips} " in
@@ -1814,10 +1814,13 @@ is_listening() {
 status_domain_diagnostics() {
   local domain="$1" issues=0 dns_ips="" pub="" ip
 
+  # 没配域名时不做任何 DNS 检查（否则 getent ahosts "" 会返回 2）
+  [ -n "$domain" ] || return 0
+
   echo "--- 域名与 HTTPS 检查 ---"
 
   pub="$(get_public_ip || true)"
-  dns_ips="$(getent ahosts "$domain" 2>/dev/null | awk '{ print $1 }' | sort -u | tr '\n' ' ')"
+  dns_ips="$(getent ahosts "$domain" 2>/dev/null | awk '{ print $1 }' | sort -u | tr '\n' ' ' || true)"
   if [ -n "$dns_ips" ]; then
     echo "DNS 解析  ：${dns_ips}"
     if [ -n "$pub" ]; then
