@@ -30,7 +30,7 @@ SUB_BIN="/usr/local/bin/napi"
 LOCAL_SCRIPT="${INSTALL_DIR}/deploy.sh"
 NGINX_SITE="/etc/nginx/sites-available/new-api.conf"
 SCRIPT_URL="https://raw.githubusercontent.com/Legends-ou/newapi-auto-command/main/deploy.sh"
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.4.1"
 SCRIPT_BUILD="2026-10-21"
 APT_LOG="/tmp/newapi-deploy-apt.log"
 
@@ -878,6 +878,7 @@ Type=simple
 User=${CPA_USER}
 Group=${CPA_USER}
 WorkingDirectory=${CPA_DIR}
+Environment=MANAGEMENT_STATIC_PATH=${CPA_DIR}/static
 ExecStart=${CPA_BIN} --config ${CPA_CONF}
 Restart=always
 RestartSec=5
@@ -912,6 +913,7 @@ install_cpa() {
   fi
   install -d -m 0755 "$CPA_DIR"
   install -d -m 0700 "$CPA_AUTH_DIR"
+  install -d -m 0750 "$CPA_DIR/static"
   install -d -m 0750 "$CPA_CONF_DIR"
   chown -R "${CPA_USER}:${CPA_USER}" "$CPA_DIR"
   chown "root:${CPA_USER}" "$CPA_CONF_DIR"
@@ -957,6 +959,18 @@ install_cpa() {
           ST_UFW_PORTS="$(printf '%s' "${ST_UFW_PORTS:-}" | tr ',' '\n' | grep -vx "${CPA_PORT}/tcp" | paste -sd ',' - || true)"
         fi
         log_ok "CPA 已就绪（127.0.0.1:${CPA_PORT}，仅本机）"
+      fi
+
+      # 管理面板是启动时从 GitHub 下载的；下载失败会 404，这里明确提示
+      local panel_code=""
+      panel_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+        "http://127.0.0.1:${CPA_PORT}/management.html" 2>/dev/null || echo 000)"
+      if [ "$panel_code" = "404" ] || [ "$panel_code" = "000" ]; then
+        log_warn "CPA 管理面板未就绪（/management.html 返回 ${panel_code}）"
+        log_warn "通常是启动时下载面板失败（需要访问 GitHub）。查看：journalctl -u ${CPA_SERVICE} -n 50 | grep -i -E 'management|panel|download'"
+        log_warn "面板目录：${CPA_DIR}/static（可用 MANAGEMENT_STATIC_PATH 覆盖）"
+      else
+        log_ok "CPA 管理面板：http://127.0.0.1:${CPA_PORT}/management.html"
       fi
       return 0
     fi
