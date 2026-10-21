@@ -771,6 +771,7 @@ resolve_cpa_version() {
 }
 
 download_cpa() {
+  [ -n "$ARCH" ] || die "内部错误：架构未初始化（请重跑命令）"
   local ver="${CPA_VERSION#v}"
   local asset="CLIProxyAPI_${ver}_linux_${ARCH}.tar.gz"
   local base="https://github.com/${CPA_REPO}/releases/download/${CPA_VERSION}"
@@ -1451,6 +1452,9 @@ cmd_domain() {
 cmd_cpa() {
   require_root "$@"
   [ -x "${INSTALL_DIR}/new-api" ] || die "尚未安装 New API，请先执行 install"
+
+  # 关键：必须先探测系统架构，否则下载地址里的 arch 为空
+  detect_os
 
   WITH_CPA="true"
   install_cpa
