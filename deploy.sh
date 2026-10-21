@@ -30,7 +30,7 @@ SUB_BIN="/usr/local/bin/napi"
 LOCAL_SCRIPT="${INSTALL_DIR}/deploy.sh"
 NGINX_SITE="/etc/nginx/sites-available/new-api.conf"
 SCRIPT_URL="https://raw.githubusercontent.com/Legends-ou/newapi-auto-command/main/deploy.sh"
-SCRIPT_VERSION="1.5.3"
+SCRIPT_VERSION="1.5.4"
 SCRIPT_BUILD="2026-10-21"
 APT_LOG="/tmp/newapi-deploy-apt.log"
 
@@ -1910,6 +1910,10 @@ run_cpa_menu() {
       return 0
     fi
 
+    if [ "$sub" != "0" ]; then
+      tui_clear
+    fi
+
     case "$sub" in
       0) SKIP_MENU_PAUSE="true"; return 0 ;;
       1|2|3)
@@ -1996,6 +2000,7 @@ run_menu() {
     esac
 
     FROM_MENU="true"
+    tui_clear
     case "$choice" in
       1) dispatch install ;;
       2) dispatch status ;;
