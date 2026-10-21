@@ -30,7 +30,7 @@ SUB_BIN="/usr/local/bin/napi"
 LOCAL_SCRIPT="${INSTALL_DIR}/deploy.sh"
 NGINX_SITE="/etc/nginx/sites-available/new-api.conf"
 SCRIPT_URL="https://raw.githubusercontent.com/Legends-ou/newapi-auto-command/main/deploy.sh"
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.5.2"
 SCRIPT_BUILD="2026-10-21"
 APT_LOG="/tmp/newapi-deploy-apt.log"
 
@@ -1346,25 +1346,37 @@ open_firewall() {
   log_info "已在 ufw 放行端口（卸载时移除）"
 }
 
+self_tmp() {
+  # 临时文件放在脚本同目录，保证 mv 是原子重命名（不会截断正在运行的脚本）
+  if [ -d "$INSTALL_DIR" ]; then
+    mktemp "${LOCAL_SCRIPT}.tmp.XXXXXX"
+  else
+    mktemp
+  fi
+}
+
 save_self() {
   # 优先从发布地址取最新版（这样 upgrade 会顺带更新脚本本身）；
   # 网络不可用时退回复制当前文件。
   local tmp
-  tmp="$(mktemp)"
+  tmp="$(self_tmp)"
   if curl -fsSL --connect-timeout 10 --max-time 60 "$SCRIPT_URL" -o "$tmp" 2>/dev/null \
     && bash -n "$tmp" 2>/dev/null; then
-    install -m 0755 "$tmp" "$LOCAL_SCRIPT"
-    rm -f "$tmp"
+    chmod 0755 "$tmp"
+    mv -f "$tmp" "$LOCAL_SCRIPT"
     return 0
   fi
   rm -f "$tmp"
 
   if [ -f "${BASH_SOURCE[0]:-}" ]; then
-    if cp -f "${BASH_SOURCE[0]}" "$LOCAL_SCRIPT" 2>/dev/null; then
-      chmod 0755 "$LOCAL_SCRIPT"
+    tmp="$(self_tmp)"
+    if cp -f "${BASH_SOURCE[0]}" "$tmp" 2>/dev/null; then
+      chmod 0755 "$tmp"
+      mv -f "$tmp" "$LOCAL_SCRIPT"
       log_warn "无法访问发布地址，已复制当前脚本（可能是旧版）"
       return 0
     fi
+    rm -f "$tmp"
   fi
   return 1
 }
@@ -1372,7 +1384,7 @@ save_self() {
 cmd_self_update() {
   require_root "$@"
   local tmp
-  tmp="$(mktemp)"
+  tmp="$(self_tmp)"
   log_info "下载最新脚本..."
   if ! curl -fsSL --connect-timeout 10 --max-time 60 "$SCRIPT_URL" -o "$tmp"; then
     rm -f "$tmp"
@@ -1382,8 +1394,8 @@ cmd_self_update() {
     rm -f "$tmp"
     die "下载的脚本语法校验失败，已中止（现有脚本未改动）"
   fi
-  install -m 0755 "$tmp" "$LOCAL_SCRIPT"
-  rm -f "$tmp"
+  chmod 0755 "$tmp"
+  mv -f "$tmp" "$LOCAL_SCRIPT"
   log_ok "脚本已更新：${LOCAL_SCRIPT}"
   log_info "重新运行 napi 即可使用新版本"
 }
@@ -1847,6 +1859,7 @@ run_cpa_menu() {
 
   while true; do
     host="$(cpa_config_host)"
+    tui_enter
     tui_clear
     echo "=============================================="
     echo "        CPA 管理"
@@ -1951,7 +1964,7 @@ run_menu() {
     fi
 
     case "$choice" in
-      0) menu_quit ;;
+      0|q|Q) menu_quit ;;
       1|2|3|4|5|6|7|8|9|10|11|12) ;;
       *) continue ;;
     esac
@@ -1972,7 +1985,7 @@ run_menu() {
       12) dispatch uninstall ;;
     esac
 
-    printf '\n按回车返回菜单（q 退出）: ' > /dev/tty 2>/dev/null || true
+    printf '\n按回车返回菜单，输入 q 直接退出: ' > /dev/tty 2>/dev/null || true
     menu_read again || menu_unreadable
     case "$again" in q|Q) menu_quit ;; esac
   done
