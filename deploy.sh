@@ -37,8 +37,6 @@ PORT="3000"
 PORT_SET="false"
 DOMAIN=""
 TLS_EMAIL=""
-ARG_ADMIN_USER=""
-ARG_ADMIN_PASS=""
 ARG_VERSION=""
 GH_PROXY=""
 TIMEZONE="Asia/Shanghai"
@@ -155,8 +153,6 @@ New API 一键部署 / 卸载脚本（Debian / Ubuntu）
   --port <端口>              New API 监听端口（默认 3000）
   --domain <域名>            绑定域名并自动申请 HTTPS 证书
   --email <邮箱>             证书通知邮箱，用 --domain 时必填
-  --admin-user <用户名>      管理员用户名（≤12 字符），默认随机
-  --admin-password <密码>    管理员密码（8-128 字符），默认随机
   --version <vX.Y.Z>         指定版本，默认最新 Release
   --gh-proxy <URL>           GitHub 下载加速前缀
   --timezone <时区>          默认 Asia/Shanghai
@@ -183,10 +179,6 @@ parse_args() {
       --domain=*)        DOMAIN="${1#*=}"; shift ;;
       --email)           TLS_EMAIL="${2:-}"; shift 2 ;;
       --email=*)         TLS_EMAIL="${1#*=}"; shift ;;
-      --admin-user)      ARG_ADMIN_USER="${2:-}"; shift 2 ;;
-      --admin-user=*)    ARG_ADMIN_USER="${1#*=}"; shift ;;
-      --admin-password)  ARG_ADMIN_PASS="${2:-}"; shift 2 ;;
-      --admin-password=*) ARG_ADMIN_PASS="${1#*=}"; shift ;;
       --version)         ARG_VERSION="${2:-}"; shift 2 ;;
       --version=*)       ARG_VERSION="${1#*=}"; shift ;;
       --gh-proxy)        GH_PROXY="${2:-}"; shift 2 ;;
@@ -446,14 +438,12 @@ download_binary() {
 }
 
 load_or_generate_secrets() {
-  step "准备密钥与管理员账号"
+  step "准备密钥"
 
   SESSION_SECRET="$(env_get SESSION_SECRET)"
   CRYPTO_SECRET="$(env_get CRYPTO_SECRET)"
-  local saved_port saved_user saved_pass
+  local saved_port
   saved_port="$(env_get PORT)"
-  saved_user="$(env_get ADMIN_USER)"
-  saved_pass="$(env_get ADMIN_PASSWORD)"
 
   if [ "$PORT_SET" = "false" ] && [ -n "$saved_port" ]; then
     PORT="$saved_port"
@@ -461,29 +451,6 @@ load_or_generate_secrets() {
 
   SESSION_SECRET="${SESSION_SECRET:-$(rand_hex 32)}"
   CRYPTO_SECRET="${CRYPTO_SECRET:-$(rand_hex 32)}"
-
-  if [ -n "$ARG_ADMIN_USER" ]; then
-    ADMIN_USER="$ARG_ADMIN_USER"
-  elif [ -n "${saved_user:-}" ]; then
-    ADMIN_USER="$saved_user"
-  else
-    ADMIN_USER="admin$(rand_hex 2)"
-  fi
-
-  if [ -n "$ARG_ADMIN_PASS" ]; then
-    ADMIN_PASSWORD="$ARG_ADMIN_PASS"
-  elif [ -n "${saved_pass:-}" ]; then
-    ADMIN_PASSWORD="$saved_pass"
-  else
-    ADMIN_PASSWORD="Aa1$(rand_hex 6)"
-  fi
-
-  [ "${#ADMIN_USER}" -le 12 ] || die "管理员用户名不能超过 12 个字符（New API 限制）"
-  case "$ADMIN_USER" in
-    *[!A-Za-z0-9_]*) die "管理员用户名只能包含字母、数字和下划线" ;;
-  esac
-  [ "${#ADMIN_PASSWORD}" -ge 8 ] && [ "${#ADMIN_PASSWORD}" -le 128 ] \
-    || die "管理员密码长度需在 8-128 之间"
 
   DB_PATH="${ST_DB_PATH:-${DATA_DIR}/new-api.db}"
 }
@@ -499,8 +466,6 @@ write_env_file() {
     printf 'CRYPTO_SECRET=%s\n' "$CRYPTO_SECRET"
     printf 'GIN_MODE=release\n'
     printf 'TZ=%s\n' "$TIMEZONE"
-    printf 'ADMIN_USER=%s\n' "$ADMIN_USER"
-    printf 'ADMIN_PASSWORD=%s\n' "$ADMIN_PASSWORD"
     printf 'SERVER_HOST=%s\n' "$host"
     umask 022
   } > "$ENV_FILE"
@@ -570,40 +535,6 @@ start_service() {
   log_err "服务未能就绪，最近日志："
   journalctl -u "$SERVICE" -n 60 --no-pager || true
   die "启动失败"
-}
-
-setup_admin() {
-  step "创建管理员账号"
-
-  local status
-  status="$(curl -fsS --max-time 10 "http://127.0.0.1:${PORT}/api/setup" 2>/dev/null || true)"
-
-  case "$status" in
-    *'"status":true'*) ;;
-    *)
-      log_info "系统已初始化过，跳过创建管理员"
-      return 0
-      ;;
-  esac
-
-  local payload
-  payload="$(printf '{"username":"%s","password":"%s","confirmPassword":"%s","SelfUseModeEnabled":false,"DemoSiteEnabled":false}' \
-    "$ADMIN_USER" "$ADMIN_PASSWORD" "$ADMIN_PASSWORD")"
-
-  local resp
-  resp="$(curl -fsS --max-time 30 -X POST -H 'Content-Type: application/json' \
-    -d "$payload" "http://127.0.0.1:${PORT}/api/setup" 2>/dev/null || true)"
-
-  case "$resp" in
-    *'"success":true'*)
-      log_ok "管理员已创建：${ADMIN_USER}"
-      ;;
-    *)
-      log_err "创建管理员失败，接口返回：${resp:-<空>}"
-      log_err "可以稍后打开 http://<服务器IP>:${PORT} 用网页向导创建"
-      return 1
-      ;;
-  esac
 }
 
 # ---------------------------------------------------------------- Nginx / HTTPS
@@ -821,8 +752,7 @@ write_credentials() {
     printf '# New API 部署凭据（由 deploy.sh 生成）\n'
     printf '# 生成时间：%s\n\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
     printf '访问地址   : %s\n' "$1"
-    printf '管理员账号 : %s\n' "$ADMIN_USER"
-    printf '管理员密码 : %s\n' "$ADMIN_PASSWORD"
+    printf '管理员     : 首次访问网页时自行创建\n'
     printf '\n# SQLite 数据库（本机文件）\n'
     printf 'DB_PATH=%s\n' "$DB_PATH"
     printf '\n# 应用配置\n'
@@ -843,8 +773,7 @@ print_summary() {
   printf '%s==============================================%s\n' "$C_GREEN" "$C_RESET"
   echo ""
   echo "  访问地址：${url}"
-  echo "  管理员账号：${ADMIN_USER}"
-  echo "  管理员密码：${ADMIN_PASSWORD}"
+  echo "  管理员：首次打开网址时自行创建（脚本不生成账号）"
   echo ""
   echo "  版本：$(app_version)"
   echo "  数据库：SQLite（${DB_PATH}）"
@@ -1022,7 +951,6 @@ cmd_install() {
   log_ok "配置已写入 ${ENV_FILE}"
 
   start_service
-  setup_admin || log_warn "管理员没有自动创建，可稍后网页向导创建"
 
   open_firewall
 
@@ -1177,6 +1105,13 @@ cmd_status() {
   else
     echo "健康检查  ：失败"
   fi
+
+  local setup_state=""
+  setup_state="$(curl -sS --max-time 3 "http://127.0.0.1:${PORT}/api/setup" 2>/dev/null || true)"
+  case "$setup_state" in
+    *'"status":true'*) echo "管理后台  ：首次访问需创建管理员" ;;
+    *) echo "管理后台  ：已初始化" ;;
+  esac
   echo ""
 
   if [ -n "$domain" ]; then

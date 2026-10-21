@@ -3,7 +3,7 @@
 一条命令把 [New API](https://github.com/QuantumNous/new-api) 装好，另一条命令把它删干净。
 
 - **单二进制 + SQLite**：不依赖 PostgreSQL / Redis，装完即可用；
-- **自动建管理员**：服务起来后调用官方 `POST /api/setup` 创建，不用打开网页向导；
+- **管理员自己建**：装完打开网址，用 New API 的初始化页面创建（脚本不生成、也不保存你的密码）；
 - **装完生成 `napi` 命令**：以后输入 `napi` 打开菜单，不用再贴 curl；
 - **一键卸载**：服务、二进制、SQLite 数据、快捷命令、Nginx 站点、证书、临时文件、按需卸载的软件包，最后做残留自检；
 - **不干扰现有程序**：只新增 `newapi` 用户、`/opt/new-api`、`/etc/new-api` 与自己的 systemd 单元，不动别的服务。
@@ -36,7 +36,7 @@ curl -sSL https://raw.githubusercontent.com/Legends-ou/newapi-auto-command/main/
 - 答 `n` 或回车 → 装完用 `http://IP:3000` 访问；
 - 答 `y` → 填域名和证书邮箱，自动装 Nginx + Let's Encrypt 证书。
 
-装完会打印访问地址和管理员账号密码，并生成 `napi` 快捷命令。
+装完会打印访问地址，并生成 `napi` 快捷命令。**首次打开网址会要求创建管理员**，用户名和密码由你自己设置。
 
 不想要交互：
 
@@ -108,8 +108,6 @@ napi uninstall    # 卸载
 | `--port <端口>` | 监听端口 | `3000` |
 | `--domain <域名>` | 绑定域名并启用 HTTPS | 交互时询问 |
 | `--email <邮箱>` | 证书通知邮箱，用 `--domain` 时必填 | 无 |
-| `--admin-user <用户名>` | 管理员用户名（≤12 字符） | 随机 `adminXXXX` |
-| `--admin-password <密码>` | 管理员密码（8–128 字符） | 随机 `Aa1` + 12 位十六进制 |
 | `--version <vX.Y.Z>` | 指定版本 | 最新 Release |
 | `--gh-proxy <URL>` | GitHub 下载加速前缀 | 无 |
 | `--timezone <时区>` | 时区 | `Asia/Shanghai` |
@@ -207,12 +205,13 @@ sudo bash /opt/new-api/deploy.sh install --gh-proxy https://ghproxy.net/
 sudo bash /opt/new-api/deploy.sh install --port 3001
 ```
 
+**打开网址是「创建管理员」页面**
+
+这是**正常现象**：脚本不自动建号，请在这个页面设置你自己的管理员用户名和密码。创建完成后 `napi status` 会显示「管理后台：已初始化」。
+
 **管理员密码忘了**
 
-当前版本**不支持重置**（New API 账号密码用 Argon2id，没法用普通工具生成哈希写库）。可用的办法：
-
-- 卸载时加 `--keep-data` 保住数据库，但重装会重新初始化；
-- 后续版本计划通过给应用临时注入 `ACCOUNT_PASSWORD_HASH_ALGORITHM=bcrypt` 再写库的方式支持重置。
+账号密码由你创建时自己设置，脚本不保存。当前版本**不支持重置**（New API 账号密码用 Argon2id，没法用普通工具生成哈希写库）。请务必记牢；确实忘了只能删库重建（会丢数据）。
 
 所以请第一时间保存好 `credentials.txt`。
 
