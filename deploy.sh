@@ -44,6 +44,7 @@ CPA_UNIT_FILE="/etc/systemd/system/cpa.service"
 CPA_PORT="8317"
 CPA_BIN="${CPA_DIR}/cli-proxy-api"
 CPA_VERSION=""
+CPA_EXPOSE="false"
 
 ACTION="install"
 PORT="3000"
@@ -183,6 +184,7 @@ New API 一键部署 / 卸载脚本（Debian / Ubuntu）
   --no-cpa                   不安装 CPA（只装 New API）
   --cpa-port <端口>          CPA 监听端口（默认 8317，只绑 127.0.0.1）
   --cpa-version <vX.Y.Z>     指定 CPA 版本
+  --cpa-expose               把 CPA 管理界面暴露到公网（默认只监听本机）
   -h, --help                 显示本帮助
 
 说明：
@@ -214,6 +216,7 @@ parse_args() {
       --no-cpa)          WITH_CPA="false"; shift ;;
       --cpa-port)        CPA_PORT="${2:-}"; shift 2 ;;
       --cpa-port=*)      CPA_PORT="${1#*=}"; shift ;;
+      --cpa-expose)      CPA_EXPOSE="true"; shift ;;
       --cpa-version)     CPA_VERSION_ARG="${2:-}"; shift 2 ;;
       --cpa-version=*)   CPA_VERSION_ARG="${1#*=}"; shift ;;
       --keep-data)       KEEP_DATA="true"; shift ;;
@@ -813,16 +816,22 @@ download_cpa() {
 }
 
 write_cpa_conf() {
+  local cpa_host="127.0.0.1" allow_remote="false" note="# 只监听本机：公网无法访问，管理界面走 SSH 隧道"
+  if [ "${CPA_EXPOSE:-false}" = "true" ]; then
+    cpa_host="0.0.0.0"
+    allow_remote="true"
+    note="# 已对外暴露：公网可直接打开管理界面（需管理密钥）"
+  fi
   umask 077
   {
     printf '# CPA 配置（由 deploy.sh 生成）\n'
-    printf '# 只监听本机：公网无法访问，管理界面走 SSH 隧道\n'
-    printf 'host: "127.0.0.1"\n'
+    printf '%s\n' "$note"
+    printf 'host: "%s"\n' "$cpa_host"
     printf 'port: %s\n' "$CPA_PORT"
     printf 'auth-dir: "%s"\n' "$CPA_AUTH_DIR"
     printf '\n'
     printf 'remote-management:\n'
-    printf '  allow-remote: false\n'
+    printf '  allow-remote: %s\n' "$allow_remote"
     printf '  secret-key: "%s"\n' "$CPA_MANAGE_KEY"
     printf '\n'
     printf 'api-keys:\n'
@@ -875,7 +884,11 @@ cpa_health() {
 }
 
 install_cpa() {
-  step "安装 CPA（仅监听 127.0.0.1:${CPA_PORT}）"
+  if [ "${CPA_EXPOSE:-false}" = "true" ]; then
+    step "安装 CPA（对外暴露，端口 ${CPA_PORT}）"
+  else
+    step "安装 CPA（仅监听 127.0.0.1:${CPA_PORT}）"
+  fi
 
   if ! id -u "$CPA_USER" >/dev/null 2>&1; then
     useradd -r -s /bin/sh -d "$CPA_DIR" "$CPA_USER"
@@ -911,7 +924,16 @@ install_cpa() {
   local i
   for i in $(seq 1 30); do
     if cpa_health; then
-      log_ok "CPA 已就绪（127.0.0.1:${CPA_PORT}，仅本机）"
+      if [ "${CPA_EXPOSE:-false}" = "true" ]; then
+        if command -v ufw >/dev/null 2>&1 \
+          && ufw status 2>/dev/null | awk '/Status: active/ { found = 1 } END { exit !found }'; then
+          ufw allow "${CPA_PORT}/tcp" >/dev/null 2>&1 || true
+          ST_UFW_PORTS="${ST_UFW_PORTS:+${ST_UFW_PORTS},}${CPA_PORT}/tcp"
+        fi
+        log_ok "CPA 已就绪（对外监听 :${CPA_PORT}，需在云安全组放行）"
+      else
+        log_ok "CPA 已就绪（127.0.0.1:${CPA_PORT}，仅本机）"
+      fi
       return 0
     fi
     if ! systemctl is-active --quiet "$CPA_SERVICE"; then
@@ -972,8 +994,12 @@ write_credentials() {
       printf 'CPA_API_URL=%s\n' "http://127.0.0.1:${CPA_PORT}/v1"
       printf 'CPA_API_KEY=%s\n' "$CPA_API_KEY"
       printf 'CPA_MANAGE_KEY=%s\n' "$CPA_MANAGE_KEY"
-      printf 'CPA管理界面: ssh -L %s:127.0.0.1:%s root@<服务器IP> 后打开 http://127.0.0.1:%s/management.html\n' \
-        "$CPA_PORT" "$CPA_PORT" "$CPA_PORT"
+      if [ "${CPA_EXPOSE:-false}" = "true" ]; then
+        printf 'CPA管理界面: http://<服务器公网IP>:%s/management.html（已在公网暴露）\n' "$CPA_PORT"
+      else
+        printf 'CPA管理界面: ssh -L %s:127.0.0.1:%s root@<服务器IP> 后打开 http://127.0.0.1:%s/management.html\n' \
+          "$CPA_PORT" "$CPA_PORT" "$CPA_PORT"
+      fi
     fi
     umask 022
   } > "$CRED_FILE"
@@ -1461,9 +1487,17 @@ cmd_cpa() {
   cmd_cred || true
 
   echo ""
+  local pub=""
+  pub="$(get_public_ip || true)"
+  [ -n "$pub" ] || pub="<服务器IP>"
   echo "  下一步："
-  echo "    1) ssh -L ${CPA_PORT}:127.0.0.1:${CPA_PORT} root@<服务器IP>"
-  echo "       浏览器打开 http://127.0.0.1:${CPA_PORT}/management.html"
+  if [ "${CPA_EXPOSE:-false}" = "true" ]; then
+    echo "    1) 浏览器直接打开 http://${pub}:${CPA_PORT}/management.html"
+    echo "       （需在云安全组放行 ${CPA_PORT}；管理密钥见凭据文件）"
+  else
+    echo "    1) 在你自己的电脑上执行：ssh -L ${CPA_PORT}:127.0.0.1:${CPA_PORT} root@${pub}"
+    echo "       保持窗口，再打开 http://127.0.0.1:${CPA_PORT}/management.html"
+  fi
   echo "    2) 在 CPA 管理界面里 OAuth 登录订阅账号"
   echo "    3) New API 渠道：类型 OpenAI，Base URL http://127.0.0.1:${CPA_PORT}/v1"
   echo "       密钥见 ${CRED_FILE} 里的 CPA_API_KEY"
