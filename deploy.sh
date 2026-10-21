@@ -1131,7 +1131,10 @@ wait_health() {
 prompt_domain_config() {
   local ans="" d="" e=""
   printf '是否绑定域名并启用 HTTPS？(y/N) ' > /dev/tty
-  read -r ans < /dev/tty || ans=""
+  if ! read -r ans < /dev/tty; then
+    log_warn "终端读取失败，已取消"
+    return 1
+  fi
   case "$ans" in
     [Yy]*) ;;
     *) return 1 ;;
@@ -1139,7 +1142,10 @@ prompt_domain_config() {
 
   while true; do
     printf '  域名（例如 api.example.com）: ' > /dev/tty
-    read -r d < /dev/tty || d=""
+    if ! read -r d < /dev/tty; then
+      log_warn "终端读取失败，已取消"
+      return 1
+    fi
     case "$d" in
       ''|*[!A-Za-z0-9.-]*) printf '  域名只能含字母、数字、点和连字符，请重试\n' > /dev/tty ;;
       *) break ;;
@@ -1148,7 +1154,10 @@ prompt_domain_config() {
 
   while true; do
     printf '  证书通知邮箱: ' > /dev/tty
-    read -r e < /dev/tty || e=""
+    if ! read -r e < /dev/tty; then
+      log_warn "终端读取失败，已取消"
+      return 1
+    fi
     case "$e" in
       *@*.*) break ;;
       *) printf '  邮箱格式不对，请重试\n' > /dev/tty ;;
@@ -1168,7 +1177,11 @@ ensure_domain_setup() {
 
   if [ "$restart_first" = "true" ]; then
     write_env_file "127.0.0.1"
-    systemctl restart "$SERVICE"
+    if ! systemctl restart "$SERVICE"; then
+      log_err "应用重启失败，最近日志："
+      journalctl -u "$SERVICE" -n 40 --no-pager || true
+      die "配置域名中止：应用无法以 127.0.0.1 监听"
+    fi
     wait_health || log_err "服务重启后健康检查未通过：journalctl -u ${SERVICE} -n 60 --no-pager"
   fi
 
@@ -1184,7 +1197,11 @@ ensure_domain_setup() {
     ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
     ST_UFW_PORTS="${ST_UFW_PORTS:+${ST_UFW_PORTS},}${PORT}/tcp"
   fi
-  systemctl restart "$SERVICE"
+  if ! systemctl restart "$SERVICE"; then
+    log_err "回退到 IP 访问时应用重启失败，最近日志："
+    journalctl -u "$SERVICE" -n 40 --no-pager || true
+    die "配置域名中止：应用无法重启"
+  fi
   wait_health || log_err "服务重启后健康检查未通过：journalctl -u ${SERVICE} -n 60 --no-pager"
   save_state
   return 1
@@ -1350,7 +1367,14 @@ setup_nginx() {
     return 1
   fi
   systemctl enable nginx >/dev/null 2>&1 || true
-  systemctl reload nginx 2>/dev/null || systemctl restart nginx
+  if ! systemctl reload nginx 2>/dev/null; then
+    if ! systemctl restart nginx; then
+      log_err "Nginx 启动失败："
+      systemctl status nginx --no-pager -l | sed -n '1,15p' || true
+      rm -f "$tmp_http" "$tmp_tls"
+      return 1
+    fi
+  fi
 
   if [ ! -f "${cert_dir}/fullchain.pem" ]; then
     log_info "正在申请 Let's Encrypt 证书（需要 ${DOMAIN} 已解析到本机、80 端口可访问）..."
