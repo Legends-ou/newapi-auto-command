@@ -67,14 +67,19 @@ napi uninstall    # 卸载
 
 ```
   1) 安装 / 重装（自动使用最新版）
-  2) 配置域名 / HTTPS
-  3) 查看状态
+  2) 查看状态
+  3) 配置域名 / HTTPS
   4) 升级到最新版
-  5) 卸载
-  6) 查看凭据
-  7) 重启应用
-  8) 查看日志
-  9) 清理旧版本备份
+  5) 重启应用
+  6) 查看日志
+
+  7) 查看凭据
+  8) 重新生成凭据
+  9) 更新脚本本身
+ 10) 清理旧版本备份
+ 11) CPA 管理（开放 / 收回 / 状态）
+
+ 12) 卸载
   0) 退出
 ```
 
@@ -89,14 +94,17 @@ napi uninstall    # 卸载
 | 操作 | 已装（推荐） | 未装 / 不依赖本地副本 |
 | --- | --- | --- |
 | 安装 / 重装 | `napi` → 1 | `curl -sSL <脚本地址> \| sudo bash -s -- install` |
-| 配置域名 | `napi domain` | `... -s -- domain` |
 | 查看状态 | `napi status` | `... -s -- status` |
+| 配置域名 | `napi domain` | `... -s -- domain` |
 | 升级 | `napi upgrade` | `... -s -- upgrade` |
-| 查看凭据 | `napi show` | `... -s -- show` |
 | 重启 | `napi restart` | `... -s -- restart` |
 | 日志 | `napi logs` | `... -s -- logs` |
+| 查看凭据 | `napi show` | `... -s -- show` |
+| 重新生成凭据 | `napi cred` | `... -s -- cred` |
+| 更新脚本本身 | `napi self-update` | `... -s -- self-update` |
 | 清理旧备份 | `napi clean` | `... -s -- clean` |
-| 卸载 | `napi` → 5 | `... -s -- uninstall` |
+| CPA 安装/开放/收回 | `napi` → 11，或 `napi cpa [--cpa-expose\|--cpa-hide]` | `... -s -- cpa --cpa-expose` |
+| 卸载 | `napi` → 12 | `... -s -- uninstall` |
 | 查看脚本版本 | `napi -V` | `bash deploy.sh -V` |
 
 `-s --` 的作用：让 bash 从标准输入读脚本，同时把它后面的内容作为脚本参数；漏掉 `--` 时命令会被当成 bash 自己的参数。
@@ -142,6 +150,21 @@ napi uninstall    # 卸载
 ## CPA（把订阅转成 API）
 
 安装默认会一并装 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)，**只监听 `127.0.0.1:8317`，公网访问不到**。不想要就加 `--no-cpa`。
+
+### 在菜单里管理 CPA
+
+主菜单选 **11** 会进入子菜单，不用记命令：
+
+```
+  1) 开放公网（临时）
+  2) 收回（仅本机）
+  3) 查看状态与密钥
+  4) 安装 / 修复
+  0) 返回主菜单
+```
+
+- **开放后**：`http://<公网IP>:8317/management.html`（需云安全组放行 8317）；
+- **收回后**：回到 `127.0.0.1`，外部立即连不上（即使安全组还开着）。
 
 ### 访问 CPA 管理界面（仅管理员）
 

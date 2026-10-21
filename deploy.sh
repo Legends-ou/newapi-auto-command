@@ -30,7 +30,7 @@ SUB_BIN="/usr/local/bin/napi"
 LOCAL_SCRIPT="${INSTALL_DIR}/deploy.sh"
 NGINX_SITE="/etc/nginx/sites-available/new-api.conf"
 SCRIPT_URL="https://raw.githubusercontent.com/Legends-ou/newapi-auto-command/main/deploy.sh"
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.4.0"
 SCRIPT_BUILD="2026-10-21"
 APT_LOG="/tmp/newapi-deploy-apt.log"
 
@@ -145,51 +145,61 @@ tui_clear() {
 usage() {
   printf 'New API 一键部署 / 卸载脚本 v%s（%s）\n\n' "$SCRIPT_VERSION" "$SCRIPT_BUILD"
   cat <<'EOF'
-New API 一键部署 / 卸载脚本（Debian / Ubuntu）
+支持 Ubuntu 22.04+ / Debian 12+
 
 用法：
   bash deploy.sh [命令] [选项]
 
-  首次运行（未安装）直接安装；已安装后不带参数运行会显示交互菜单：
-    sudo bash deploy.sh                # 首次=安装；已装=菜单
-    sudo bash deploy.sh install        # 跳过菜单，直接安装
+  首次运行（未安装）直接安装；已安装后不带参数运行显示菜单：
+    sudo bash deploy.sh              # 首次=安装；已装=菜单
+    sudo bash deploy.sh install      # 跳过菜单直接安装
 
-  通过 curl 执行时，命令与选项要放在 bash -s -- 之后：
-    curl -sSL <脚本地址> | sudo bash                      # 安装
-    curl -sSL <脚本地址> | sudo bash -s -- status         # 状态
-    curl -sSL <脚本地址> | sudo bash -s -- uninstall      # 卸载
+  curl 方式（命令与选项放在 bash -s -- 之后）：
+    curl -sSL <脚本地址> | sudo bash
+    curl -sSL <脚本地址> | sudo bash -s -- status
+    curl -sSL <脚本地址> | sudo bash -s -- uninstall
 
-命令：
-  install      安装（默认）
-  upgrade      只替换二进制，保留数据
-  status       查看访问地址与服务状态
-  uninstall    卸载并清理本脚本创建的全部资源
+命令（按日常使用顺序）：
+  install      安装 / 重装（默认）
+  status       查看访问地址、服务与 CPA 状态
   domain       配置域名并启用 HTTPS
-  show         查看当前凭据与端口
+  upgrade      只替换应用二进制，保留数据
   restart      重启应用
-  logs         跟踪应用日志（默认最近 100 行）
-  clean        删除旧版本备份 new-api.bak
+  logs         跟踪应用日志（--lines 控制行数）
+  show         查看当前凭据
   cred         重新生成凭据文件（不重装）
-  cpa          安装 / 修复 CPA（不重装 New API）
-  self-update  只更新脚本本身（不重装、不升级应用）
+  self-update  只更新脚本本身
+  clean        删除旧版本备份 new-api.bak
+  cpa          安装 / 修复 CPA；配合 --cpa-expose / --cpa-hide 切换开放
+  uninstall    卸载并清理本脚本创建的全部资源
 
 选项：
-  --port <端口>              New API 监听端口（默认 3000）
-  --domain <域名>            绑定域名并自动申请 HTTPS 证书
-  --email <邮箱>             证书通知邮箱，用 --domain 时必填
-  --version <vX.Y.Z>         指定版本，默认最新 Release
-  --gh-proxy <URL>           GitHub 下载加速前缀
-  --timezone <时区>          默认 Asia/Shanghai
-  --lines <行数>             logs 显示行数（默认 100）
-  --verbose                  显示 apt / certbot / 下载的完整输出
-  --yes                      卸载时跳过确认
-  --keep-data                卸载时先备份 SQLite 数据库
-  --no-cpa                   不安装 CPA（只装 New API）
-  --cpa-port <端口>          CPA 监听端口（默认 8317，只绑 127.0.0.1）
-  --cpa-version <vX.Y.Z>     指定 CPA 版本
-  --cpa-expose               把 CPA 管理界面暴露到公网（默认只监听本机）
-  -h, --help                 显示本帮助
-  -V, --script-version       只看脚本版本
+  [监听与域名]
+    --port <端口>            New API 监听端口（默认 3000）
+    --domain <域名>          绑定域名并自动申请 HTTPS
+    --email <邮箱>           证书通知邮箱（配合 --domain）
+
+  [版本与网络]
+    --version <vX.Y.Z>       指定 New API 版本（默认最新）
+    --gh-proxy <URL>         GitHub 下载加速前缀
+    --timezone <时区>        默认 Asia/Shanghai
+
+  [CPA]
+    --no-cpa                 不安装 CPA（只装 New API）
+    --cpa-port <端口>        CPA 端口（默认 8317）
+    --cpa-version <vX.Y.Z>   指定 CPA 版本
+    --cpa-expose             临时开放 CPA 管理界面到公网
+    --cpa-hide               收回 CPA，只监听本机（默认）
+
+  [维护]
+    --lines <行数>           logs 显示行数（默认 100）
+    --verbose                显示 apt / certbot / 下载完整输出
+    -h, --help               显示本帮助
+    -V, --script-version     只看脚本版本
+
+  [卸载]
+    --yes                    跳过确认
+    --keep-data              先备份 SQLite 再删除
 
 说明：
   数据默认存 SQLite（/opt/new-api/data/new-api.db），不依赖 PostgreSQL / Redis。
@@ -221,6 +231,7 @@ parse_args() {
       --cpa-port)        CPA_PORT="${2:-}"; shift 2 ;;
       --cpa-port=*)      CPA_PORT="${1#*=}"; shift ;;
       --cpa-expose)      CPA_EXPOSE="true"; shift ;;
+      --cpa-hide)        CPA_EXPOSE="false"; shift ;;
       --cpa-version)     CPA_VERSION_ARG="${2:-}"; shift 2 ;;
       --cpa-version=*)   CPA_VERSION_ARG="${1#*=}"; shift ;;
       --keep-data)       KEEP_DATA="true"; shift ;;
@@ -933,10 +944,18 @@ install_cpa() {
         if command -v ufw >/dev/null 2>&1 \
           && ufw status 2>/dev/null | awk '/Status: active/ { found = 1 } END { exit !found }'; then
           ufw allow "${CPA_PORT}/tcp" >/dev/null 2>&1 || true
-          ST_UFW_PORTS="${ST_UFW_PORTS:+${ST_UFW_PORTS},}${CPA_PORT}/tcp"
+          case ",${ST_UFW_PORTS:-}," in
+            *",${CPA_PORT}/tcp,"*) ;;
+            *) ST_UFW_PORTS="${ST_UFW_PORTS:+${ST_UFW_PORTS},}${CPA_PORT}/tcp" ;;
+          esac
         fi
         log_ok "CPA 已就绪（对外监听 :${CPA_PORT}，需在云安全组放行）"
       else
+        # 收回时把之前放行的规则也撤掉（云安全组仍需你手动处理）
+        if command -v ufw >/dev/null 2>&1; then
+          ufw delete allow "${CPA_PORT}/tcp" >/dev/null 2>&1 || true
+          ST_UFW_PORTS="$(printf '%s' "${ST_UFW_PORTS:-}" | tr ',' '\n' | grep -vx "${CPA_PORT}/tcp" | paste -sd ',' - || true)"
+        fi
         log_ok "CPA 已就绪（127.0.0.1:${CPA_PORT}，仅本机）"
       fi
       return 0
@@ -1501,9 +1520,11 @@ cmd_cpa() {
   if [ "${CPA_EXPOSE:-false}" = "true" ]; then
     echo "    1) 浏览器直接打开 http://${pub}:${CPA_PORT}/management.html"
     echo "       （需在云安全组放行 ${CPA_PORT}；管理密钥见凭据文件）"
+    echo "       用完收回：sudo napi cpa --cpa-hide"
   else
     echo "    1) 在你自己的电脑上执行：ssh -L ${CPA_PORT}:127.0.0.1:${CPA_PORT} root@${pub}"
     echo "       保持窗口，再打开 http://127.0.0.1:${CPA_PORT}/management.html"
+    echo "       临时开放公网：sudo napi cpa --cpa-expose"
   fi
   echo "    2) 在 CPA 管理界面里 OAuth 登录订阅账号"
   echo "    3) New API 渠道：类型 OpenAI，Base URL http://127.0.0.1:${CPA_PORT}/v1"
@@ -1741,6 +1762,99 @@ menu_read() {
   return 1
 }
 
+cpa_config_host() {
+  [ -f "$CPA_CONF" ] || return 0
+  sed -n 's/^host:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$CPA_CONF" | sed -n '1p'
+}
+
+cmd_cpa_info() {
+  local host pub k1 k2
+  host="$(cpa_config_host)"
+  pub="$(get_public_ip || true)"
+  [ -n "$pub" ] || pub="<服务器IP>"
+
+  echo ""
+  echo "  二进制：${CPA_BIN}"
+  if systemctl is-active "$CPA_SERVICE" >/dev/null 2>&1; then
+    echo "  服务  ：运行中"
+  else
+    echo "  服务  ：未运行"
+  fi
+  echo "  监听  ：${host:-?}:${CPA_PORT}"
+  if [ "$host" = "0.0.0.0" ]; then
+    echo "  管理页：http://${pub}:${CPA_PORT}/management.html"
+  else
+    echo "  管理页：ssh -L ${CPA_PORT}:127.0.0.1:${CPA_PORT} root@${pub}"
+    echo "          然后打开 http://127.0.0.1:${CPA_PORT}/management.html"
+  fi
+  k1="$(cpa_env_get CPA_MANAGE_KEY)"
+  k2="$(cpa_env_get CPA_API_KEY)"
+  echo "  管理密钥：${k1:-未设置}"
+  echo "  渠道密钥：${k2:-未设置}"
+  echo ""
+}
+
+run_cpa_menu() {
+  local sub="" again="" host="" pub=""
+  pub="$(get_public_ip || true)"
+  [ -n "$pub" ] || pub="<服务器IP>"
+
+  while true; do
+    host="$(cpa_config_host)"
+    tui_clear
+    echo "=============================================="
+    echo "        CPA 管理"
+    echo "=============================================="
+    echo ""
+    if [ -x "$CPA_BIN" ]; then
+      if systemctl is-active "$CPA_SERVICE" >/dev/null 2>&1; then
+        echo "  服务：运行中"
+      else
+        echo "  服务：未运行"
+      fi
+    else
+      echo "  服务：未安装"
+    fi
+    if [ "$host" = "0.0.0.0" ]; then
+      echo "  模式：公网可访问 → http://${pub}:${CPA_PORT}/management.html"
+    else
+      echo "  模式：仅本机（SSH 隧道）"
+    fi
+    echo ""
+    echo "  1) 开放公网（临时）"
+    echo "  2) 收回（仅本机）"
+    echo "  3) 查看状态与密钥"
+    echo "  4) 安装 / 修复"
+    echo "  0) 返回主菜单"
+    echo ""
+
+    printf '请选择: ' > /dev/tty 2>/dev/null || true
+    if ! menu_read sub; then
+      return 0
+    fi
+
+    case "$sub" in
+      0) return 0 ;;
+      1) CPA_EXPOSE="true";  dispatch cpa ;;
+      2) CPA_EXPOSE="false"; dispatch cpa ;;
+      3) cmd_cpa_info ;;
+      4)
+        if [ "$host" = "0.0.0.0" ]; then CPA_EXPOSE="true"; else CPA_EXPOSE="false"; fi
+        dispatch cpa
+        ;;
+      *) continue ;;
+    esac
+
+    printf '\n按回车继续（q 返回主菜单）: ' > /dev/tty 2>/dev/null || true
+    if ! menu_read again; then
+      return 0
+    fi
+    case "$again" in
+      q|Q) return 0 ;;
+    esac
+  done
+}
+
 run_menu() {
   [ "$(id -u)" -eq 0 ] || die "请用 root 运行，例如：sudo bash deploy.sh"
 
@@ -1761,17 +1875,19 @@ run_menu() {
     echo "  当前状态：${state}"
     echo ""
     echo "  1) 安装 / 重装（自动使用最新版）"
-    echo "  2) 配置域名 / HTTPS"
-    echo "  3) 查看状态"
+    echo "  2) 查看状态"
+    echo "  3) 配置域名 / HTTPS"
     echo "  4) 升级到最新版"
-    echo "  5) 卸载"
-    echo "  6) 查看凭据"
-    echo "  7) 重启应用"
-    echo "  8) 查看日志"
-    echo "  9) 清理旧版本备份"
-    echo " 10) 重新生成凭据"
-    echo " 11) 更新脚本本身"
-    echo " 12) 安装 / 修复 CPA"
+    echo "  5) 重启应用"
+    echo "  6) 查看日志"
+    echo ""
+    echo "  7) 查看凭据"
+    echo "  8) 重新生成凭据"
+    echo "  9) 更新脚本本身"
+    echo " 10) 清理旧版本备份"
+    echo " 11) CPA 管理（开放 / 收回 / 状态）"
+    echo ""
+    echo " 12) 卸载"
     echo "  0) 退出"
     echo ""
 
@@ -1791,17 +1907,17 @@ run_menu() {
     FROM_MENU="true"
     case "$choice" in
       1) dispatch install ;;
-      2) dispatch domain ;;
-      3) dispatch status ;;
+      2) dispatch status ;;
+      3) dispatch domain ;;
       4) dispatch upgrade ;;
-      5) dispatch uninstall ;;
-      6) dispatch show ;;
-      7) dispatch restart ;;
-      8) dispatch logs ;;
-      9) dispatch clean ;;
-      10) dispatch cred ;;
-      11) dispatch self-update ;;
-      12) dispatch cpa ;;
+      5) dispatch restart ;;
+      6) dispatch logs ;;
+      7) dispatch show ;;
+      8) dispatch cred ;;
+      9) dispatch self-update ;;
+      10) dispatch clean ;;
+      11) run_cpa_menu ;;
+      12) dispatch uninstall ;;
     esac
 
     printf '\n按回车返回菜单（q 退出）: ' > /dev/tty 2>/dev/null || true
